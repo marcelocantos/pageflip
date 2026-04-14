@@ -1,0 +1,128 @@
+schema_version: 1
+targets:
+  T1:
+    name: Rust implementation captures a screen region to deduplicated PNGs on macOS
+    status: identified
+    value: 13.0
+    cost: 5.0
+    acceptance:
+    - Cargo project replaces the Python code; `cargo build --release` produces a single `pageflip` binary on macOS arm64
+    - '`pageflip --region X,Y,W,H --interval 2 --threshold 10 --output <dir>` captures the region on each tick and writes a PNG only when pHash Hamming distance from the last saved frame exceeds the threshold'
+    - Capture and hash loop uses a platform-abstract trait so Windows/Linux backends slot in without rewriting call sites
+    - macOS Screen Recording permission prompt is handled cleanly with a useful error message on denial
+    context: Foundation for everything else. The current Python stub broke on uv's Python Tk (missing Tcl). User prefers compiled, cross-platform-capable; Rust chosen (Swift rejected for mac lock-in). This target establishes the Cargo project, portable screen-capture abstraction (xcap or scap as a starting point), perceptual-hash dedup, CLI surface (--region, --interval, --threshold, --output), and PNG writer. macOS-first but the architecture must not preclude Windows/Linux backends later.
+    origin: bullseye_init
+    discovered: 2026-04-14
+  T2:
+    name: Interactive region picker lets the user draw a rectangle on the desktop (macOS)
+    status: identified
+    value: 5.0
+    cost: 3.0
+    acceptance:
+    - '`pageflip` with no `--region` shows a semi-transparent fullscreen overlay with crosshair cursor'
+    - Click-drag draws a visible rectangle; release begins capture using those pixel coordinates
+    - Coordinates are correct on Retina displays (no half-size captures)
+    - Escape exits without capturing
+    context: Running `pageflip` with no region flag should present a fullscreen transparent overlay with a rubber-band rectangle. Retina-aware (overlay in points, capture coords in pixels). Escape cancels. Tk on uv's Python was a failed first attempt; the Rust implementation uses winit + softbuffer/pixels for drawing, which avoids the Tcl runtime issue entirely.
+    depends_on:
+    - T1
+    origin: manual
+    discovered: 2026-04-14
+  T3:
+    name: pageflip can target a specific window and keep capturing it when backgrounded (macOS)
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - '`pageflip --window` shows a list of visible windows (title + app) and lets the user pick one'
+    - '`pageflip --window-title "Teams"` attaches to the first window whose title contains the substring'
+    - Capture continues unchanged when the target window is covered by another window, moved, or on another Space
+    - The capture bitmap reflects the window's current content (not a stale cached frame) each tick
+    context: 'Primary use case is capturing slides from a Teams meeting where the window may be occluded, behind another app, or off-screen. macOS ScreenCaptureKit with SCContentFilter(desktopIndependentWindow:) captures the window''s backing store regardless of foreground state. Supports two selection modes: interactive window picker (enumerate via CGWindowListCopyWindowInfo) and non-interactive `--window-title` substring match. Moving/resizing the target window must not break the capture stream.'
+    depends_on:
+    - T1
+    origin: manual
+    discovered: 2026-04-14
+  T4:
+    name: User can crop a sub-rectangle within a selected window and have it tracked as the window moves or resizes
+    status: identified
+    value: 3.0
+    cost: 3.0
+    acceptance:
+    - '`pageflip --window --crop` picks a window, snapshots it, and shows the snapshot with a rubber-band picker'
+    - The rectangle is stored as fractional or absolute window-relative coordinates, not screen-absolute
+    - If the user resizes the window during capture, the crop still covers the same logical sub-region (proportional) or clamps gracefully
+    - Output PNGs contain only the cropped region
+    context: A Teams window has chrome, participant tiles, and a chat pane; only the shared-screen area is interesting. The picker takes a one-shot snapshot of the selected window, displays it, and lets the user drag a rectangle on the snapshot. The resulting bbox is stored as window-relative coordinates, so subsequent captures crop consistently even if the window is moved, resized, or rescaled on another display. Avoids the "overlay tracks the window" UX which is fragile.
+    depends_on:
+    - T3
+    origin: manual
+    discovered: 2026-04-14
+  T5:
+    name: A filesystem-watching feeder pushes each new slide into an active Claude Code session for live analysis
+    status: identified
+    value: 13.0
+    cost: 3.0
+    acceptance:
+    - A feeder binary or subcommand watches an output directory and reacts to new PNG files
+    - Each new image triggers `claude -p <prompt> --resume <session-id>` with the image attached via `@path` reference
+    - Session ID is configurable; missing session produces a useful error without crashing the capture loop
+    - Capture and feeding are independent — a broken Claude invocation does not stop pageflip from continuing to save files
+    context: 'The reason pageflip exists is to feed slides into Claude Code during a meeting for live capture and analysis. Decoupled design: pageflip stays a pure capture tool that emits one line per saved PNG on stdout; a small feeder consumes that stream (or watches the output directory via the `notify` crate) and invokes `claude -p \"analyse @<path>\" --resume <session-id>` for each new image. Start with the CLI-invocation approach; cworkers integration is a later optimisation. The feeder can be a separate binary in this repo or a `pageflip feed` subcommand — either way, it must not couple the capture loop to Claude.'
+    depends_on:
+    - T1
+    origin: manual
+    discovered: 2026-04-14
+  T6:
+    name: Windows backend reaches feature parity (region, window, background window, crop)
+    status: identified
+    value: 5.0
+    cost: 8.0
+    acceptance:
+    - All capture modes (region, window, cropped window) work on Windows 11
+    - Background and minimised windows continue to produce updated captures
+    - Release binary builds in CI for x86_64-pc-windows-msvc and aarch64-pc-windows-msvc
+    - Interactive region picker overlay renders correctly on Windows at 100% and 200% DPI
+    context: Corporate environments run Windows as often as macOS. Windows.Graphics.Capture (Win10 1809+) via the windows-capture crate covers region and window capture, including minimised/occluded windows via the DWM compositor surface. PrintWindow(PW_RENDERFULLCONTENT) is the fallback path. winit handles the overlay. `cargo build --target x86_64-pc-windows-msvc` from mac via cross-compilation, or run CI on Windows.
+    depends_on:
+    - T1
+    - T2
+    - T3
+    - T4
+    origin: manual
+    discovered: 2026-04-14
+  T7:
+    name: Linux backend works under X11; Wayland supported on best-effort basis
+    status: identified
+    value: 2.0
+    cost: 8.0
+    acceptance:
+    - Region and window capture work on X11 with a compositor running
+    - Background-window capture works on X11 via XComposite
+    - 'Wayland: runs on KDE and GNOME to the extent their portal implementations allow; limitations are documented rather than worked around'
+    - Release binary builds in CI for x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu
+    context: 'Lowest-priority platform (user has no current Linux use case) but the cross-platform capability is what justified Rust over Swift. X11 path uses XCompositeNameWindowPixmap for background windows (requires a running compositor, which is near-universal). Wayland is intentionally best-effort: xdg-desktop-portal''s ScreenCast for window pick works on KDE/GNOME but background-window capture is compositor-dependent and may simply not be achievable on some setups. Acceptance reflects this asymmetry.'
+    depends_on:
+    - T1
+    - T2
+    - T3
+    - T4
+    origin: manual
+    discovered: 2026-04-14
+  T8:
+    name: pageflip is installable via Homebrew tap and ships release binaries on tag
+    status: identified
+    value: 3.0
+    cost: 3.0
+    acceptance:
+    - '`brew install marcelocantos/tap/pageflip` installs a working macOS arm64 binary'
+    - Tagging `v0.1.0` on master triggers a GitHub Actions workflow that builds, tests, and publishes release binaries
+    - Release includes `--version`, `--help`, `--help-agent` per the CLI convention
+    - Binary is code-signed or users are given clear Gatekeeper bypass instructions in the README
+    context: 'Matches the global "CLI Binaries" convention: macOS arm64 primary, Linux x86_64/arm64, Windows x86_64/arm64. Uses existing marcelocantos/homebrew-tap pattern. GitHub Actions builds cross-platform release binaries on `v*.*.*` tags, uploads to GitHub Releases, and updates the Homebrew formula. This target covers the macOS-arm64 install path specifically; Windows/Linux distribution piggybacks once T6/T7 land.'
+    depends_on:
+    - T1
+    - T2
+    - T5
+    origin: manual
+    discovered: 2026-04-14
