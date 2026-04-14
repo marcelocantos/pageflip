@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# uv
+.uv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# pageflip output
+pageflip-*/
