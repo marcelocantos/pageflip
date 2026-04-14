@@ -13,6 +13,136 @@ targets:
     context: Foundation for everything else. The current Python stub broke on uv's Python Tk (missing Tcl). User prefers compiled, cross-platform-capable; Rust chosen (Swift rejected for mac lock-in). This target establishes the Cargo project, portable screen-capture abstraction (xcap or scap as a starting point), perceptual-hash dedup, CLI surface (--region, --interval, --threshold, --output), and PNG writer. macOS-first but the architecture must not preclude Windows/Linux backends later.
     origin: bullseye_init
     discovered: 2026-04-14
+  T10:
+    name: Local-first redaction pipeline strips PII from every frame before any SaaS egress
+    status: identified
+    value: 13.0
+    cost: 5.0
+    acceptance:
+    - Face detection blurs all detected faces in each captured frame before the frame reaches any downstream consumer
+    - A pluggable PII redactor (regex + local NER) masks emails, phone numbers, credit cards, government IDs, and obvious names in OCR text
+    - An app/domain allowlist drops frames whose frontmost application is not permitted to leave the machine
+    - '`--paranoid` retains unredacted originals locally and forwards only redacted artifacts'
+    - No code path reaches a network SaaS call without passing through the redactor first (enforced by type or architectural boundary, not by convention)
+    context: Corporate use is impossible without this. Runs entirely on-device so the PII never leaves the machine. Face detection via Apple Vision.framework / CoreML blurs participant video tiles; OCR + local NER + regex redacts emails, phone numbers, credit cards, government IDs, and obvious personal names; a domain/app allowlist drops frames whose focused app is not permitted (e.g., HR system, banking). `--paranoid` retains the unredacted original locally and ships only the redacted frame to any downstream consumer. Placed as a blocker for T5 (feeder) because SaaS egress of unredacted meeting frames is a career-ending risk in most enterprises.
+    depends_on:
+    - T1
+    origin: manual
+    discovered: 2026-04-14
+  T11:
+    name: Reference resolver is a pluggable pipeline with MCP auto-discovery and document-name capture
+    status: identified
+    value: 8.0
+    cost: 8.0
+    acceptance:
+    - Resolver stages are registerable via config; adding a new reference type does not require changes to the capture loop
+    - Built-in stages cover URLs, Jira keys, Confluence page titles, GitHub PR/issue references, Slack permalinks
+    - PowerPoint / Keynote / Google Slides window-title document names are captured per frame and threaded through the resolver
+    - Unrecognised patterns with repeated occurrence are surfaced as "candidate MCP resolver needed" suggestions, with sample strings
+    - Resolved references become a stable structured stream consumable by downstream targets (T5, T13, T14, T16)
+    context: 'Generalises the URL-extraction idea into an extensible resolver stack. Each captured string (from OCR or transcript) passes through stages: regex patterns → embedding similarity against known reference shapes → LLM classification → MCP server call. Built-in resolvers for URLs, Jira tickets, Confluence page titles, GitHub PRs/issues, Slack permalinks. Non-slide text references are captured too — the PowerPoint window-title "Deck.pptx - PowerPoint" gives the source document name; Teams chat-pane OCR gives in-meeting links; Keynote/Google-Slides title bars give deck provenance. Unknown patterns surface as candidate new resolvers ("I saw 47 strings matching FOO-\\d+ that no resolver recognised — is there an MCP server for this?"). Output feeds every downstream consumer: the context fetcher, contradiction detector, cognitive-augmentation sidebar, dejargoniser.'
+    depends_on:
+    - T1
+    - T9
+    origin: manual
+    discovered: 2026-04-14
+  T12:
+    name: Each meeting produces a structured artifact written to a configurable docs/ path
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - Each capture session produces a single folder containing slides/*.png, transcript.md, decisions.md, actions.md, references.json, contradictions.md, open-questions.md
+    - Destination path is configurable (CLI flag + config file); default points at a user-designated docs/ folder
+    - transcript.md rows are speaker-attributed and timestamp-aligned to slide boundaries
+    - decisions.md and actions.md are extracted automatically by an LLM pass over the transcript + slide text
+    - Re-running on the same meeting ID does not destroy the prior artifact (append / version / refuse-and-warn)
+    context: 'Final output shape: a folder per meeting containing slides/*.png, transcript.md (speaker-attributed, slide-aligned), decisions.md, actions.md (with inferred assignees), references.json (resolved), contradictions.md, open-questions.md. Destination is configurable; the natural default is a designated "meetings" repo''s docs/ subdirectory so mnemo will index it automatically (see companion mnemo target). Rerun safety: re-capturing the same meeting appends or versions rather than destroys. Replaces ad-hoc PNG dumps with a mnemo-indexable, human-readable artifact that''s joinable against code commits, Jira tickets, and prior meetings.'
+    depends_on:
+    - T9
+    - T11
+    origin: manual
+    discovered: 2026-04-14
+  T13:
+    name: Real-time cognitive-augmentation sidebar runs skeptic, constructive, and neutral perspectives in parallel
+    status: identified
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - 'For each new slide, three perspectives are produced: skeptic (challenges), constructive (additions), neutral (links and context)'
+    - Outputs appear in a sidecar view (log file, web pane, or Claude Code session) within ~5 seconds of slide detection
+    - Each perspective is clearly labelled so the user can triage at a glance
+    - Neutral perspective includes paste-able URLs and short quotes, not just summaries
+    - Perspectives can be individually enabled/disabled via flag
+    context: 'Pure devil''s-advocate was the original framing, but the useful stance is "knowledgeable colleague" — skeptical where rigour is missing, constructive where ideas are directionally sound, neutral-informative where neither applies. Three subagents run in parallel per new slide: skeptic (challenge questions, missing assumptions, counter-evidence), constructive (addenda, directional suggestions, "yes-and" extensions), neutral (paste-able links to authoritative sources, relevant prior decisions, adjacent context worth knowing). Output is a sidebar/log the user scans during the meeting — never injected into the meeting itself. Latency budget matters: the suggestions need to arrive before discussion has moved on.'
+    depends_on:
+    - T11
+    origin: manual
+    discovered: 2026-04-14
+  T14:
+    name: Cross-meeting contradiction detector surfaces conflicts in real time via the resolver pipeline
+    status: identified
+    value: 13.0
+    cost: 5.0
+    acceptance:
+    - Every claim in slide OCR and transcript is embedded and persisted to mnemo alongside its provenance (meeting, slide, timestamp, speaker)
+    - When a new claim's embedding matches a prior claim beyond a threshold but surface forms conflict (numeric, negation, assignee), a contradiction is surfaced
+    - Contradictions appear in the cognitive-augmentation sidebar in real time, not post-hoc
+    - False-positive rate is tunable via threshold; default setting surfaces roughly one contradiction per long meeting block rather than noise
+    - Each contradiction links to the prior meeting artifact and the specific slide or transcript segment that conflicts
+    context: 'The killer corporate feature. Each slide''s OCR and transcript claims are embedded and stored via mnemo (which is already indexing the docs/ artifact stream from T12). When a new claim arrives, a similarity search against prior meetings returns semantically close but numerically or factually divergent statements ("Q3 revenue was $10M" in January vs. "$12M" in April). Contradictions surface in real time through the same sidebar as T13 — they routed through the resolver (T11) so the call-out is part of the standard context-augmentation flow rather than a separate feature. Calibration matters: false-positive rate tunable, default aims for ~1 flagged contradiction per long meeting block so the user trusts the signal.'
+    depends_on:
+    - T11
+    - T12
+    origin: manual
+    discovered: 2026-04-14
+  T15:
+    name: Stopping capture autostarts a Claude Code dialog preloaded with the full meeting artifact
+    status: identified
+    value: 5.0
+    cost: 2.0
+    acceptance:
+    - Capture-stop triggers `claude` (new session or `--resume <id>`) with a preamble that loads the artifact folder
+    - User is dropped into a conversational prompt and can immediately ask questions about the meeting
+    - Session ID is configurable so related meetings can thread into a single ongoing dialog
+    - If the user exits without engaging, no artifact state is lost
+    context: 'When capture stops, a Claude Code session is launched (or resumed) with the full artifact folder already in context: slides, transcript, references, decisions, actions, contradictions. The user isn''t uploading files after the meeting — they''re continuing a conversation the tool already had. Session ID is optional so the same dialog can span many meetings on a theme ("the project Foo steering group") across days.'
+    depends_on:
+    - T12
+    origin: manual
+    discovered: 2026-04-14
+  T16:
+    name: Dejargoniser expands acronyms from a local Confluence glossary and researches unknown TLAs in real time
+    status: identified
+    value: 5.0
+    cost: 5.0
+    acceptance:
+    - A one-command scrape builds a local cache of Confluence-defined acronyms and jargon
+    - OCR'd and transcribed acronyms get inline expansion in the cognitive-augmentation sidebar
+    - Unknown acronyms trigger a background research pass (Confluence / GitHub / web) and print candidate expansions inline
+    - Cache refresh is incremental where possible and bounded in cost (no re-scraping the entire wiki each time)
+    - Misrecognised acronyms (OCR errors) don't pollute the cache
+    context: Corporate meetings are acronym-dense. A one-time scrape of the organisation's Confluence glossary pages builds a locally-cached acronym/jargon index (re-scrapable on a schedule). OCR'd or transcribed acronyms get expanded against the cache and surfaced inline in the sidebar. Acronyms with no cache hit (e.g., a new three-letter abbreviation first heard in a meeting) trigger a lightweight background research agent — Confluence search, GitHub search, web search — and print candidate expansions inline so the user isn't silently confused. Runs via the resolver (T11) so "unknown acronym" is just another resolver stage.
+    depends_on:
+    - T11
+    origin: manual
+    discovered: 2026-04-14
+  T17:
+    name: Weekly meta-pattern digest is produced by a scheduled `claude -p /skill` invocation over the week's artifacts
+    status: identified
+    value: 3.0
+    cost: 2.0
+    acceptance:
+    - A `/meetings-digest` (or similar) skill exists and produces a weekly digest from a directory of artifact folders
+    - A cron/launchd entry invokes it on schedule
+    - 'Digest lands somewhere reviewable: a markdown file committed to a repo, an email, or a mnemo session'
+    - 'Output calls out: recurring themes, drifting decisions, aging open questions, newly-surfaced contradictions, and speaker-pattern observations'
+    - Implementation is a skill + a scheduler entry, nothing more — no long-running service
+    context: 'A scheduled job (cron or launchd) invokes `claude -p ''/meetings-digest''` over the week''s artifact folders. The skill reads slides, transcripts, decisions, open questions, and contradictions, and emits a digest: themes recurring across meetings, decisions that drifted or reversed, open questions that have aged, fresh contradictions worth surfacing, speakers dominating or absent. Zero service to operate — the machinery is just a cron entry pointing at a skill, so there''s nothing to maintain beyond the skill''s prompt itself.'
+    depends_on:
+    - T12
+    origin: manual
+    discovered: 2026-04-14
   T2:
     name: Interactive region picker lets the user draw a rectangle on the desktop (macOS)
     status: identified
@@ -71,6 +201,7 @@ targets:
     context: 'The reason pageflip exists is to feed slides into Claude Code during a meeting for live capture and analysis. Decoupled design: pageflip stays a pure capture tool that emits one line per saved PNG on stdout; a small feeder consumes that stream (or watches the output directory via the `notify` crate) and invokes `claude -p \"analyse @<path>\" --resume <session-id>` for each new image. Start with the CLI-invocation approach; cworkers integration is a later optimisation. The feeder can be a separate binary in this repo or a `pageflip feed` subcommand — either way, it must not couple the capture loop to Claude.'
     depends_on:
     - T1
+    - T10
     origin: manual
     discovered: 2026-04-14
   T6:
@@ -124,5 +255,20 @@ targets:
     - T1
     - T2
     - T5
+    origin: manual
+    discovered: 2026-04-14
+  T9:
+    name: System audio is captured alongside frames and transcribed locally with speaker attribution
+    status: identified
+    value: 13.0
+    cost: 8.0
+    acceptance:
+    - System audio is captured via ScreenCaptureKit alongside screen frames on macOS
+    - Local Whisper (distil-large-v3 or large-v3-turbo by default, large-v3 optional) transcribes at ≥ 5x real-time on a 16-GPU M4 with 48 GB RAM
+    - Transcript segments are timestamped and aligned to the slide visible at that moment (stored as (slide_id, t_start, t_end, text, speaker_id) rows)
+    - Speaker diarisation assigns stable speaker IDs per utterance; optional name mapping via config
+    context: The audio channel is the missing half of the meeting signal. Most later features (contradiction detection, cognitive augmentation, meta-patterns) gain step-function value once transcript + speaker attribution are aligned to the slide visible at that moment. Model sizing is tuned for the user's 48 GB / 16-GPU work machine (not the 128 GB home machine) — default to distil-large-v3 (~800 MB) or large-v3-turbo rather than full large-v3, both of which fit comfortably and run at ~5-8x real-time on Apple Silicon. Diarisation via pyannote or equivalent gives per-speaker segmentation without Teams cooperation.
+    depends_on:
+    - T1
     origin: manual
     discovered: 2026-04-14
