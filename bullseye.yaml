@@ -216,10 +216,11 @@ targets:
     discovered: 2026-04-14
   T3:
     name: pageflip can target a specific window and keep capturing it when backgrounded (macOS)
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - '`pageflip --window` shows a list of visible windows (title + app) and lets the user pick one'
     - '`pageflip --window-title "Teams"` attaches to the first window whose title contains the substring'
@@ -230,6 +231,7 @@ targets:
     - T1.3
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-15
   T4:
     name: User can crop a sub-rectangle within a selected window and have it tracked as the window moves or resizes
     status: identified
@@ -247,10 +249,11 @@ targets:
     discovered: 2026-04-14
   T5:
     name: A filesystem-watching feeder pushes each new slide into an active Claude Code session for live analysis
-    status: identified
+    status: achieved
     value: 13.0
     cost: 3.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - A feeder binary or subcommand watches an output directory and reacts to new PNG files
     - Each new image triggers `claude -p <prompt> --resume <session-id>` with the image attached via `@path` reference
@@ -262,6 +265,7 @@ targets:
     - T1.3
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-15
   T6:
     name: Windows backend reaches feature parity (region, window, background window, crop)
     status: identified

@@ -44,11 +44,11 @@ impl Frame {
 
 /// Identifies a window for targeted capture.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum WindowSpec {
     /// Match the first window whose title contains this substring (case-sensitive).
     TitleContains(String),
     /// Match the window whose title equals this string exactly (case-sensitive).
+    #[allow(dead_code)] // reserved for a future `--window-title-exact` flag
     TitleExact(String),
     /// Match by numeric window ID as returned by [`WindowInfo::id`].
     Id(u32),
@@ -69,7 +69,6 @@ pub trait Capture {
     fn capture(&self, region: Region) -> Result<Frame, CaptureError>;
 
     /// Return metadata for all visible, non-minimized windows.
-    #[allow(dead_code)]
     fn list_windows(&self) -> Result<Vec<WindowInfo>, CaptureError>;
 
     /// Capture the single window matched by `spec`.
@@ -77,7 +76,6 @@ pub trait Capture {
     /// Returns `Err(WindowNotFound)` when no window matches and
     /// `Err(AmbiguousWindow)` when a `TitleContains`/`TitleExact` spec matches
     /// more than one window.
-    #[allow(dead_code)]
     fn capture_window(&self, spec: &WindowSpec) -> Result<Frame, CaptureError>;
 }
 
@@ -96,11 +94,9 @@ pub enum CaptureError {
     /// PNG encoding failed.
     EncodeFailed(String),
     /// No window matched the given spec.
-    #[allow(dead_code)]
     WindowNotFound(String),
     /// Multiple windows matched a title-based spec; the caller should present
     /// the list so the user can disambiguate.
-    #[allow(dead_code)]
     AmbiguousWindow(Vec<WindowInfo>),
 }
 

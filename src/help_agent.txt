@@ -9,6 +9,11 @@ PURPOSE
 
 INVOCATION
   pageflip [--region X,Y,W,H] [--interval SECS] [--threshold N] [--output DIR]
+  pageflip --window                  # interactive window picker on stdin
+  pageflip --window-title SUBSTRING
+  pageflip --window-id ID
+  pageflip --list-windows            # print visible windows and exit
+  pageflip                           # no target flag → interactive region picker
   pageflip --version
   pageflip --help
   pageflip --help-agent
@@ -53,7 +58,8 @@ LOOP BEHAVIOUR
   capture completes and exits 0.
 
 PLATFORM STATUS
-  macOS arm64   primary target (🎯T1.1, 🎯T1.2, 🎯T1.3 complete)
+  macOS arm64   🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T2, 🎯T3 complete
+                (region capture, dedup loop, region picker, window capture)
   Windows       planned (🎯T6)
   Linux X11     planned best-effort (🎯T7)
 

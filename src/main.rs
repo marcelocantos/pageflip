@@ -16,8 +16,13 @@ use std::time::Duration;
 use clap::Parser;
 use time::OffsetDateTime;
 
-use capture::{default_backend, Capture, Region};
+use capture::{default_backend, Capture, Region, WindowSpec};
 use dedup::Dedup;
+
+enum Target {
+    Region(Region),
+    Window(WindowSpec),
+}
 
 const HELP_AGENT: &str = include_str!("help_agent.txt");
 
@@ -31,10 +36,31 @@ const HELP_AGENT: &str = include_str!("help_agent.txt");
                   distance). It is designed to feed a live stream of slides into a Claude \
                   Code session during a meeting."
 )]
+#[command(group(
+    clap::ArgGroup::new("target")
+        .args(["region", "window", "window_title", "window_id", "list_windows"])
+        .multiple(false),
+))]
 struct Cli {
-    /// Region to capture as X,Y,W,H (screen coordinates, pixels).
+    /// Region to capture as X,Y,W,H (logical-point screen coordinates).
     #[arg(long, value_name = "X,Y,W,H")]
     region: Option<RegionArg>,
+
+    /// Capture a window picked interactively from the list of visible windows.
+    #[arg(long)]
+    window: bool,
+
+    /// Capture the first window whose title contains this substring.
+    #[arg(long, value_name = "SUBSTRING")]
+    window_title: Option<String>,
+
+    /// Capture the window with this numeric ID (see --list-windows).
+    #[arg(long, value_name = "ID")]
+    window_id: Option<u32>,
+
+    /// Print the list of visible windows (id, app, title) and exit.
+    #[arg(long)]
+    list_windows: bool,
 
     /// Capture interval in seconds.
     #[arg(long, default_value_t = 2.0, value_name = "SECS")]
@@ -117,15 +143,16 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
-    let region: Region = match cli.region {
-        Some(r) => r.into(),
-        None => match picker::pick_region().map_err(|e| e.to_string())? {
-            Some(r) => r,
-            None => {
-                eprintln!("pageflip: picker cancelled.");
-                return Ok(());
-            }
-        },
+    let backend = default_backend().map_err(|e| e.to_string())?;
+
+    if cli.list_windows {
+        return print_window_list(backend.as_ref());
+    }
+
+    let target = resolve_target(cli, backend.as_ref())?;
+    let Some(target) = target else {
+        eprintln!("pageflip: picker cancelled.");
+        return Ok(());
     };
 
     if !cli.interval.is_finite() || cli.interval <= 0.0 {
@@ -143,23 +170,26 @@ fn run(cli: &Cli) -> Result<(), String> {
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| format!("could not create output directory {output_dir:?}: {e}"))?;
 
-    let backend = default_backend().map_err(|e| e.to_string())?;
     let mut dedup = Dedup::new(cli.threshold);
 
     let stop = install_signal_handler()?;
 
-    eprintln!(
-        "pageflip: capturing region {:?} every {:.3}s (threshold {} bits); Ctrl-C to stop",
-        region, cli.interval, cli.threshold
-    );
+    match &target {
+        Target::Region(r) => eprintln!(
+            "pageflip: capturing region {:?} every {:.3}s (threshold {} bits); Ctrl-C to stop",
+            r, cli.interval, cli.threshold
+        ),
+        Target::Window(spec) => eprintln!(
+            "pageflip: capturing window {:?} every {:.3}s (threshold {} bits); Ctrl-C to stop",
+            spec, cli.interval, cli.threshold
+        ),
+    };
 
     loop {
         let tick_start = std::time::Instant::now();
 
-        capture_once(backend.as_ref(), region, &mut dedup, &output_dir)?;
+        capture_once(backend.as_ref(), &target, &mut dedup, &output_dir)?;
 
-        // Wait the remainder of the tick, waking early on Ctrl-C. If capture
-        // took longer than `interval`, skip the sleep and capture immediately.
         let remaining = interval.saturating_sub(tick_start.elapsed());
         if remaining.is_zero() {
             if matches!(
@@ -180,13 +210,75 @@ fn run(cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_target(cli: &Cli, backend: &dyn Capture) -> Result<Option<Target>, String> {
+    if let Some(r) = cli.region {
+        return Ok(Some(Target::Region(r.into())));
+    }
+    if let Some(id) = cli.window_id {
+        return Ok(Some(Target::Window(WindowSpec::Id(id))));
+    }
+    if let Some(title) = &cli.window_title {
+        return Ok(Some(Target::Window(WindowSpec::TitleContains(
+            title.clone(),
+        ))));
+    }
+    if cli.window {
+        return pick_window_interactively(backend).map(|opt| opt.map(Target::Window));
+    }
+    // No target flags: fall back to the interactive region picker.
+    match picker::pick_region().map_err(|e| e.to_string())? {
+        Some(r) => Ok(Some(Target::Region(r))),
+        None => Ok(None),
+    }
+}
+
+fn pick_window_interactively(backend: &dyn Capture) -> Result<Option<WindowSpec>, String> {
+    let windows = backend.list_windows().map_err(|e| e.to_string())?;
+    if windows.is_empty() {
+        return Err("no visible windows available for capture".to_string());
+    }
+    eprintln!("Visible windows:");
+    for (i, w) in windows.iter().enumerate() {
+        eprintln!("  [{i}] id={} {} — {}", w.id, w.app_name, w.title);
+    }
+    eprint!("Pick by index (blank to cancel): ");
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("stdin: {e}"))?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let idx: usize = trimmed
+        .parse()
+        .map_err(|e| format!("invalid index {trimmed:?}: {e}"))?;
+    let picked = windows
+        .get(idx)
+        .ok_or_else(|| format!("index {idx} out of range (0..{})", windows.len()))?;
+    Ok(Some(WindowSpec::Id(picked.id)))
+}
+
+fn print_window_list(backend: &dyn Capture) -> Result<(), String> {
+    let windows = backend.list_windows().map_err(|e| e.to_string())?;
+    for w in &windows {
+        println!("{}\t{}\t{}", w.id, w.app_name, w.title);
+    }
+    Ok(())
+}
+
 fn capture_once(
     backend: &dyn Capture,
-    region: Region,
+    target: &Target,
     dedup: &mut Dedup,
     output_dir: &Path,
 ) -> Result<(), String> {
-    let frame = backend.capture(region).map_err(|e| e.to_string())?;
+    let frame = match target {
+        Target::Region(r) => backend.capture(*r),
+        Target::Window(spec) => backend.capture_window(spec),
+    }
+    .map_err(|e| e.to_string())?;
     if !dedup.should_save(&frame) {
         return Ok(());
     }
