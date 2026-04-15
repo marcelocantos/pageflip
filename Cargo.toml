@@ -1,0 +1,22 @@
+[package]
+name = "pageflip"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Marcelo Cantos"]
+license = "Apache-2.0"
+description = "Capture slides from a screen region whenever they change"
+repository = "https://github.com/marcelocantos/pageflip"
+readme = "README.md"
+
+[[bin]]
+name = "pageflip"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

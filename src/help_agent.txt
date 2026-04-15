@@ -1,0 +1,51 @@
+pageflip --help-agent
+=====================
+
+PURPOSE
+  Capture a region of the screen on a timer and write a PNG whenever the
+  contents change more than a configurable perceptual-hash threshold. The
+  primary consumer is a Claude Code session that receives each new slide
+  as it lands.
+
+INVOCATION
+  pageflip [--region X,Y,W,H] [--interval SECS] [--threshold N] [--output DIR]
+  pageflip --version
+  pageflip --help
+  pageflip --help-agent
+
+OPTIONS
+  --region X,Y,W,H   Rectangle to capture, in screen pixels. X,Y is the
+                     top-left corner; W,H are width and height. If omitted,
+                     an interactive picker will eventually prompt the user
+                     (🎯T2; not yet implemented).
+  --interval SECS    Seconds between captures. Floating-point. Default: 2.
+  --threshold N      Minimum pHash Hamming distance from the last saved
+                     frame required to save a new frame. Default: 10.
+  --output DIR       Directory to write PNGs into. Default: a timestamped
+                     directory under the current working directory.
+  --version          Print version and exit.
+  --help             Print human-oriented help and exit.
+  --help-agent       Print this machine-oriented help and exit.
+
+EXIT CODES
+  0   Clean exit (including --version, --help, --help-agent).
+  2   Capture logic not yet implemented (current status during 🎯T1.1).
+      Will become the "invalid argument" code once capture lands.
+
+OUTPUT CONTRACT (once capture is implemented)
+  One line is written to stdout per saved PNG, formatted as:
+      <absolute-path>\n
+  Downstream consumers (e.g. the T5 feeder) tail this stream.
+
+PLATFORM STATUS
+  macOS arm64   primary target (🎯T1.2, 🎯T1.3 in progress)
+  Windows       planned (🎯T6)
+  Linux X11     planned best-effort (🎯T7)
+
+PERMISSIONS (macOS)
+  Requires Screen Recording permission (System Settings > Privacy &
+  Security > Screen Recording). On first run the OS prompt appears; if
+  the user denies, pageflip exits with a readable error (🎯T1.2).
+
+TARGETS
+  See bullseye.yaml in the repo root for the full target graph.

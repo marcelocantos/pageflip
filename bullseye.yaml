@@ -2,7 +2,7 @@ schema_version: 1
 targets:
   T1:
     name: Rust implementation captures a screen region to deduplicated PNGs on macOS
-    status: identified
+    status: achieved
     value: 13.0
     cost: 5.0
     acceptance:
@@ -12,6 +12,56 @@ targets:
     - macOS Screen Recording permission prompt is handled cleanly with a useful error message on denial
     context: Foundation for everything else. The current Python stub broke on uv's Python Tk (missing Tcl). User prefers compiled, cross-platform-capable; Rust chosen (Swift rejected for mac lock-in). This target establishes the Cargo project, portable screen-capture abstraction (xcap or scap as a starting point), perceptual-hash dedup, CLI surface (--region, --interval, --threshold, --output), and PNG writer. macOS-first but the architecture must not preclude Windows/Linux backends later.
     origin: bullseye_init
+    discovered: 2026-04-14
+    achieved: 2026-04-14
+  T1.1:
+    name: Cargo skeleton compiles and the pageflip binary implements --version, --help, --help-agent
+    status: achieved
+    value: 5.0
+    cost: 1.0
+    observable: true
+    actual_cost: 1.0
+    acceptance:
+    - A Cargo workspace builds via `cargo build --release` and produces a single `pageflip` binary on macOS arm64
+    - '`pageflip --version` prints the crate version'
+    - '`pageflip --help` prints a usage message listing the planned flags (`--region`, `--interval`, `--threshold`, `--output`)'
+    - '`pageflip --help-agent` prints machine-readable help per the global CLI Binaries convention'
+    - The Python stub is removed or clearly marked legacy so there is no ambiguity about which implementation is current
+    context: 'First sub-target split out of the original T1 umbrella. Establishes the Cargo project, CLI skeleton, and release-binary plumbing — no capture logic yet. Observable checkpoint: running `pageflip --help` in a terminal proves the walking skeleton exists. Unblocks T1.2.'
+    origin: manual
+    discovered: 2026-04-14
+    achieved: 2026-04-15
+  T1.2:
+    name: pageflip captures a single macOS region to one PNG from CLI args
+    status: identified
+    value: 8.0
+    cost: 2.0
+    observable: true
+    acceptance:
+    - '`pageflip --region X,Y,W,H --output <dir>` captures the given rectangle once on macOS and writes one PNG, then exits'
+    - Pixel coordinates are correct on Retina displays (no half-size captures)
+    - macOS Screen Recording permission prompt is handled cleanly with a useful error message on denial
+    - A platform-abstract capture trait exists so Windows/Linux backends can slot in without rewriting call sites (only macOS backend is implemented)
+    context: 'Second sub-target of the original T1. Delivers the smallest end-to-end slice: one PNG on disk from CLI args. Establishes the ScreenCaptureKit-based macOS backend, the platform-neutral capture trait, the permission-handling path, and the PNG writer. No timer loop, no dedup — those arrive in T1.3. Observable checkpoint: a single screenshot file the user can open. Unblocks T1.3.'
+    depends_on:
+    - T1.1
+    origin: manual
+    discovered: 2026-04-14
+  T1.3:
+    name: pageflip runs an interval capture loop with pHash dedup and writes only-changed PNGs
+    status: identified
+    value: 13.0
+    cost: 3.0
+    observable: true
+    acceptance:
+    - '`pageflip --region X,Y,W,H --interval 2 --threshold 10 --output <dir>` captures on each tick and writes a PNG only when the perceptual-hash Hamming distance from the last saved frame exceeds the threshold'
+    - The capture-and-hash loop is defined in terms of the platform-abstract trait established in T1.2, so new backends plug in without touching the loop
+    - Emits one line per saved PNG on stdout so downstream tools (feeder, tests) can consume the stream
+    - Ctrl-C terminates cleanly and flushes any in-flight frame
+    context: 'Third sub-target of the original T1. Adds the interval loop, the perceptual-hash dedup gate, and the stdout stream that T5 will consume. After this lands, the original T1 is fully superseded and downstream targets (T2, T3, T5, T9, T10) can begin. Observable checkpoint: a directory of deduped slide PNGs accumulating as the screen changes.'
+    depends_on:
+    - T1.2
+    origin: manual
     discovered: 2026-04-14
   T10:
     name: Local-first redaction pipeline strips PII from every frame before any SaaS egress
@@ -26,7 +76,7 @@ targets:
     - No code path reaches a network SaaS call without passing through the redactor first (enforced by type or architectural boundary, not by convention)
     context: Corporate use is impossible without this. Runs entirely on-device so the PII never leaves the machine. Face detection via Apple Vision.framework / CoreML blurs participant video tiles; OCR + local NER + regex redacts emails, phone numbers, credit cards, government IDs, and obvious personal names; a domain/app allowlist drops frames whose focused app is not permitted (e.g., HR system, banking). `--paranoid` retains the unredacted original locally and ships only the redacted frame to any downstream consumer. Placed as a blocker for T5 (feeder) because SaaS egress of unredacted meeting frames is a career-ending risk in most enterprises.
     depends_on:
-    - T1
+    - T1.3
     origin: manual
     discovered: 2026-04-14
   T11:
@@ -42,7 +92,7 @@ targets:
     - Resolved references become a stable structured stream consumable by downstream targets (T5, T13, T14, T16)
     context: 'Generalises the URL-extraction idea into an extensible resolver stack. Each captured string (from OCR or transcript) passes through stages: regex patterns → embedding similarity against known reference shapes → LLM classification → MCP server call. Built-in resolvers for URLs, Jira tickets, Confluence page titles, GitHub PRs/issues, Slack permalinks. Non-slide text references are captured too — the PowerPoint window-title "Deck.pptx - PowerPoint" gives the source document name; Teams chat-pane OCR gives in-meeting links; Keynote/Google-Slides title bars give deck provenance. Unknown patterns surface as candidate new resolvers ("I saw 47 strings matching FOO-\\d+ that no resolver recognised — is there an MCP server for this?"). Output feeds every downstream consumer: the context fetcher, contradiction detector, cognitive-augmentation sidebar, dejargoniser.'
     depends_on:
-    - T1
+    - T1.3
     - T9
     origin: manual
     discovered: 2026-04-14
@@ -51,6 +101,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
+    observable: true
     acceptance:
     - Each capture session produces a single folder containing slides/*.png, transcript.md, decisions.md, actions.md, references.json, contradictions.md, open-questions.md
     - Destination path is configurable (CLI flag + config file); default points at a user-designated docs/ folder
@@ -148,6 +199,7 @@ targets:
     status: identified
     value: 5.0
     cost: 3.0
+    observable: true
     acceptance:
     - '`pageflip` with no `--region` shows a semi-transparent fullscreen overlay with crosshair cursor'
     - Click-drag draws a visible rectangle; release begins capture using those pixel coordinates
@@ -155,7 +207,7 @@ targets:
     - Escape exits without capturing
     context: Running `pageflip` with no region flag should present a fullscreen transparent overlay with a rubber-band rectangle. Retina-aware (overlay in points, capture coords in pixels). Escape cancels. Tk on uv's Python was a failed first attempt; the Rust implementation uses winit + softbuffer/pixels for drawing, which avoids the Tcl runtime issue entirely.
     depends_on:
-    - T1
+    - T1.3
     origin: manual
     discovered: 2026-04-14
   T3:
@@ -163,6 +215,7 @@ targets:
     status: identified
     value: 8.0
     cost: 5.0
+    observable: true
     acceptance:
     - '`pageflip --window` shows a list of visible windows (title + app) and lets the user pick one'
     - '`pageflip --window-title "Teams"` attaches to the first window whose title contains the substring'
@@ -170,7 +223,7 @@ targets:
     - The capture bitmap reflects the window's current content (not a stale cached frame) each tick
     context: 'Primary use case is capturing slides from a Teams meeting where the window may be occluded, behind another app, or off-screen. macOS ScreenCaptureKit with SCContentFilter(desktopIndependentWindow:) captures the window''s backing store regardless of foreground state. Supports two selection modes: interactive window picker (enumerate via CGWindowListCopyWindowInfo) and non-interactive `--window-title` substring match. Moving/resizing the target window must not break the capture stream.'
     depends_on:
-    - T1
+    - T1.3
     origin: manual
     discovered: 2026-04-14
   T4:
@@ -193,15 +246,16 @@ targets:
     status: identified
     value: 13.0
     cost: 3.0
+    observable: true
     acceptance:
     - A feeder binary or subcommand watches an output directory and reacts to new PNG files
     - Each new image triggers `claude -p <prompt> --resume <session-id>` with the image attached via `@path` reference
     - Session ID is configurable; missing session produces a useful error without crashing the capture loop
     - Capture and feeding are independent — a broken Claude invocation does not stop pageflip from continuing to save files
-    context: 'The reason pageflip exists is to feed slides into Claude Code during a meeting for live capture and analysis. Decoupled design: pageflip stays a pure capture tool that emits one line per saved PNG on stdout; a small feeder consumes that stream (or watches the output directory via the `notify` crate) and invokes `claude -p \"analyse @<path>\" --resume <session-id>` for each new image. Start with the CLI-invocation approach; cworkers integration is a later optimisation. The feeder can be a separate binary in this repo or a `pageflip feed` subcommand — either way, it must not couple the capture loop to Claude.'
+    - Defaults to local-only invocation of `claude`; any mode that ships frames to a remote/SaaS endpoint is gated on the redactor from T10 being loaded and enforced (enforced by type or architectural boundary, not by convention)
+    context: 'Decoupled from T10 on 2026-04-14. Rationale: T5 is the whole point of pageflip (feed slides into Claude during a meeting); gating it behind full PII/face-detection (T10) delayed all observable value by months. T10 remains a first-class target and is enforced at the egress boundary — the local default path does not need it, but any SaaS/remote egress mode must have it loaded. This keeps the corporate-safety story intact without blocking personal-use MVP value.'
     depends_on:
-    - T1
-    - T10
+    - T1.3
     origin: manual
     discovered: 2026-04-14
   T6:
@@ -245,16 +299,16 @@ targets:
     status: identified
     value: 3.0
     cost: 3.0
+    observable: true
     acceptance:
     - '`brew install marcelocantos/tap/pageflip` installs a working macOS arm64 binary'
     - Tagging `v0.1.0` on master triggers a GitHub Actions workflow that builds, tests, and publishes release binaries
     - Release includes `--version`, `--help`, `--help-agent` per the CLI convention
     - Binary is code-signed or users are given clear Gatekeeper bypass instructions in the README
-    context: 'Matches the global "CLI Binaries" convention: macOS arm64 primary, Linux x86_64/arm64, Windows x86_64/arm64. Uses existing marcelocantos/homebrew-tap pattern. GitHub Actions builds cross-platform release binaries on `v*.*.*` tags, uploads to GitHub Releases, and updates the Homebrew formula. This target covers the macOS-arm64 install path specifically; Windows/Linux distribution piggybacks once T6/T7 land.'
+    context: Homebrew-tap install for macOS arm64. Decoupled from T5 on 2026-04-14 — a distributable capture tool is valuable on its own (region + picker), and bundling the feeder into the install gate delayed the dogfoodable release unnecessarily. Windows/Linux distribution piggybacks once T6/T7 land.
     depends_on:
-    - T1
+    - T1.3
     - T2
-    - T5
     origin: manual
     discovered: 2026-04-14
   T9:
@@ -262,6 +316,7 @@ targets:
     status: identified
     value: 13.0
     cost: 8.0
+    observable: true
     acceptance:
     - System audio is captured via ScreenCaptureKit alongside screen frames on macOS
     - Local Whisper (distil-large-v3 or large-v3-turbo by default, large-v3 optional) transcribes at ≥ 5x real-time on a 16-GPU M4 with 48 GB RAM
@@ -269,6 +324,6 @@ targets:
     - Speaker diarisation assigns stable speaker IDs per utterance; optional name mapping via config
     context: The audio channel is the missing half of the meeting signal. Most later features (contradiction detection, cognitive augmentation, meta-patterns) gain step-function value once transcript + speaker attribution are aligned to the slide visible at that moment. Model sizing is tuned for the user's 48 GB / 16-GPU work machine (not the 128 GB home machine) — default to distil-large-v3 (~800 MB) or large-v3-turbo rather than full large-v3, both of which fit comfortably and run at ~5-8x real-time on Apple Silicon. Diarisation via pyannote or equivalent gives per-speaker segmentation without Teams cooperation.
     depends_on:
-    - T1
+    - T1.3
     origin: manual
     discovered: 2026-04-14
