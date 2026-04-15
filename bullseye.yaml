@@ -377,36 +377,36 @@ targets:
     origin: manual
     discovered: 2026-04-15
   T9.2:
-    name: Whisper Transcriber runs fully offline and streams transcript segments to transcript.jsonl
+    name: WhisperX transcribes buffered audio locally via Whisper large-v3 into transcript.jsonl
     status: identified
     value: 8.0
     cost: 3.0
     observable: true
     acceptance:
-    - A `WhisperTranscriber` implements the T9.1 Transcriber trait using whisper.cpp via whisper-rs, running entirely in-process on local hardware
-    - 'Inference is fully offline: the only network activity permitted at runtime is the initial model download on first use, and that download is gated by an explicit flag (default: download allowed from a known mirror; `--no-network` disables it and fails fast if the model is absent)'
-    - 'After bootstrap, a `--no-network` check is enforced: pageflip refuses to hit the network for transcription even if some future code path tries to'
-    - Transcript segments land in `transcript.jsonl` in the output directory with `{start_ms, end_ms, text}` rows, flushed per segment so tailing consumers see them immediately
-    - Model selection (distil-large-v3 default, large-v3-turbo or large-v3 optional) is configurable via CLI flag and config file; default targets the user's 48 GB M-series work machine
-    - Achieves ≥ 5x real-time throughput on a 16-GPU M4 with 48 GB RAM
-    context: 'Second sub-target of T9. Turns the live audio stream from T9.1 into structured transcript text, enforcing the no-wire constraint at the inference layer. Whisper runs entirely locally via whisper.cpp bindings — no SaaS transcription API is ever called. The only permitted network activity is the one-time model download, and that is gated so an offline-first workflow can disable it. Observable: `transcript.jsonl` growing in real time as speech is detected.'
+    - Transcription uses WhisperX (Python) invoked as a subprocess by pageflip, running Whisper large-v3 weights locally via faster-whisper / CTranslate2 with Metal acceleration on M-series
+    - The audio captured under T9.1 is handed to WhisperX as a bounded in-memory buffer (or a FIFO pipe) — never written to disk as a file the filesystem retains after transcription completes
+    - 'Inference is fully offline at runtime: the only permitted network activity is the initial one-time model download via `scripts/fetch-models.sh` (or equivalent); runtime enforces `--no-network` by refusing to hit the network even if a code path tries'
+    - WhisperX's word-level forced alignment (via wav2vec2) produces `{start_ms, end_ms, text, word_segments[]}` segments written to `transcript.jsonl` in the output directory, flushed per segment
+    - 'Post-hoc operation is explicitly supported: WhisperX runs on the complete buffered audio at stop-time (or on segment boundaries), not necessarily in real time — budget is the meeting length, not 1x real-time'
+    - A `NullTranscriber` variant still exists for tests / dry-runs (discards samples; produces no transcript.jsonl)
+    context: 'Pins the concrete stack: WhisperX + Whisper large-v3 + CTranslate2 / faster-whisper backend. Runs as a Python subprocess (managed via uv per the global tooling convention). Chosen over whisper.cpp alone because WhisperX delivers word-level timestamps via wav2vec2 forced alignment, which makes T9.3''s slide-join precise instead of segment-granular. Best-quality option available locally. Model weights fetched by `scripts/fetch-models.sh` from ggerganov (Whisper) and HuggingFace Hub (faster-whisper mirror if needed); no runtime network. Observable checkpoint: `transcript.jsonl` with word-level timestamps that the user can `jq` to inspect.'
     depends_on:
     - T9.1
     origin: manual
     discovered: 2026-04-15
   T9.3:
-    name: Transcript segments gain speaker IDs (local diarisation) and slide alignment
+    name: pyannote diarisation inside WhisperX adds speaker IDs; slide alignment joins transcript rows to PNG timestamps
     status: identified
     value: 8.0
     cost: 5.0
     observable: true
     acceptance:
-    - Speaker diarisation runs inside `src/audio/` (same module that holds the raw audio buffers, so the no-egress invariant is preserved) — pyannote.audio via a bundled subprocess, a Rust-native diariser, or equivalent
-    - Diarisation assigns stable speaker IDs per utterance; optional config maps IDs to display names
-    - All diarisation happens locally — no audio or audio-derived embedding is ever sent to a network endpoint
-    - Each transcript.jsonl row is enriched to `{slide_id, t_start_ms, t_end_ms, text, speaker_id}` by joining the captured PNG stream's timestamps against segment intervals
-    - Diarisation cost does not block real-time capture — runs as an async post-processing pass on each segment, or as a finalisation step at stop-time
-    context: 'Third sub-target of T9. Brings speaker attribution and slide alignment online, preserving the T9.1 architectural boundary — because diarisation needs audio embeddings, it MUST live inside `src/audio/` (the only module allowed to touch raw audio). Slide alignment is a pure join against PNG mtimes and can live anywhere. Observable: transcript.jsonl rows show `speaker_id` + `slide_id` fields; playing back a recent meeting lets the user jump to a slide and see who said what.'
+    - WhisperX's built-in diarisation path runs pyannote/speaker-diarization-3.1 locally on the buffered audio — no audio or embedding ever sent to a network endpoint
+    - Speaker IDs are stable across the meeting (speaker_0, speaker_1, …); an optional YAML config maps them to display names post-hoc
+    - Each row in `transcript.jsonl` is enriched to `{slide_id, t_start_ms, t_end_ms, text, speaker_id, word_segments[]}` by joining WhisperX's word-level timestamps against the PNG stream's mtime metadata — a pure data-manipulation pass in Rust after the subprocess returns
+    - The pyannote model download is a one-time step documented in `scripts/fetch-models.sh` — requires a HuggingFace auth token because pyannote's licence is gated, run-once then forgotten
+    - Diarisation runs as a finalisation pass at stop-time (post-hoc is fine per project policy), not in the capture-hot loop
+    context: 'Pyannote/speaker-diarization-3.1 is the highest-quality open diariser on meeting-style audio (~90% accuracy on 2-6 speakers, turns \u22653s). WhisperX bundles it natively, so T9.2 and T9.3 are implementation-wise one subprocess call that produces fully-enriched segments; target-level separation reflects two different observable checkpoints (text \u2192 text+speakers+slides). Slide alignment is a pure Rust join against PNG mtimes and runs inside pageflip after the subprocess returns \u2014 no audio involvement. Observable: transcript.jsonl rows show speaker_id + slide_id; the user can jump to a slide and see who said what.'
     depends_on:
     - T9.2
     origin: manual
