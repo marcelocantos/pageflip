@@ -4,6 +4,9 @@
 mod capture;
 mod dedup;
 mod picker;
+// The redact module is a library layer not yet wired into the capture loop.
+#[allow(dead_code, unused_imports)]
+mod redact;
 
 use std::io::{self, Write};
 use std::num::ParseIntError;
