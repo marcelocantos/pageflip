@@ -1,0 +1,61 @@
+pageflip-feed --help-agent
+=========================
+
+PURPOSE
+  Watch a directory for new PNG files and feed each one into an active Claude
+  Code session by invoking `claude -p <prompt> --resume <session-id>`. The
+  feeder is the downstream consumer of the stream produced by `pageflip`.
+
+INVOCATION
+  pageflip-feed --watch DIR --session-id ID [--prompt TEMPLATE] [--claude PATH]
+  pageflip-feed --version
+  pageflip-feed --help
+  pageflip-feed --help-agent
+
+OPTIONS
+  --watch DIR          Directory to watch for new PNG files. Required.
+  --session-id ID      Claude Code session ID to resume. Required; the feeder
+                       exits with a clear error before starting the watch loop
+                       if this flag is absent.
+  --prompt TEMPLATE    Prompt passed to `claude -p`. Use `{path}` as a
+                       placeholder for the absolute path of the new PNG.
+                       Default: "Analyse this slide: @{path}"
+  --claude PATH        Path to the `claude` binary. Default: `claude` on PATH.
+  --version            Print version and exit.
+  --help               Print human-oriented help and exit.
+  --help-agent         Print this machine-oriented help and exit.
+
+EXIT CODES
+  0   Clean exit (Ctrl-C or natural termination).
+  1   Configuration error (missing required flag, watch directory not found).
+  2   clap-level argument parse error (wrong flag, malformed value).
+
+FEEDING BEHAVIOUR
+  The feeder uses the `notify` crate (FSEvents on macOS) to watch DIR for
+  Create events. Each new file whose name ends in `.png` triggers a
+  `claude -p <prompt> --resume <session-id>` invocation. The invocation is
+  spawned asynchronously: the feeder never waits for `claude` to exit, so a
+  slow or failing invocation does not delay the next slide.
+
+  Files already present in DIR when the feeder starts are ignored; only files
+  created after start are fed.
+
+  A small in-process dedup set (absolute canonical paths) prevents the same
+  file from being fed twice if the OS emits duplicate events.
+
+PROMPT TEMPLATE
+  `{path}` in the template is replaced with the absolute canonical path of
+  the new PNG, prefixed with `@` so Claude Code inlines the image.
+
+  Example default expansion for /slides/20260415T120000Z.png:
+      Analyse this slide: @/slides/20260415T120000Z.png
+
+RELATIONSHIP TO pageflip
+  pageflip and pageflip-feed are independent processes. pageflip writes PNGs
+  and emits one line per saved PNG on stdout. pageflip-feed watches the same
+  directory via the filesystem — it does not read pageflip's stdout. Either
+  binary can be restarted without affecting the other.
+
+TARGETS
+  See bullseye.yaml in the repo root for the full target graph.
+  This binary implements 🎯T5.
