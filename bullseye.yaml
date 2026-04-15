@@ -33,10 +33,11 @@ targets:
     achieved: 2026-04-15
   T1.2:
     name: pageflip captures a single macOS region to one PNG from CLI args
-    status: identified
+    status: achieved
     value: 8.0
     cost: 2.0
     observable: true
+    actual_cost: 2.0
     acceptance:
     - '`pageflip --region X,Y,W,H --output <dir>` captures the given rectangle once on macOS and writes one PNG, then exits'
     - Pixel coordinates are correct on Retina displays (no half-size captures)
@@ -47,6 +48,7 @@ targets:
     - T1.1
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-15
   T1.3:
     name: pageflip runs an interval capture loop with pHash dedup and writes only-changed PNGs
     status: identified

@@ -14,10 +14,15 @@ INVOCATION
   pageflip --help-agent
 
 OPTIONS
-  --region X,Y,W,H   Rectangle to capture, in screen pixels. X,Y is the
-                     top-left corner; W,H are width and height. If omitted,
-                     an interactive picker will eventually prompt the user
-                     (🎯T2; not yet implemented).
+  --region X,Y,W,H   Rectangle to capture. X,Y,W,H are in logical points
+                     (the same coordinate space as macOS `screencapture -R`
+                     and window-position APIs). X,Y is the top-left corner
+                     in absolute virtual-desktop coordinates; W,H are width
+                     and height. Captured PNGs are written at the display's
+                     physical-pixel resolution, so on a 2x Retina display a
+                     200x200 region yields a 400x400 PNG — full-resolution,
+                     not blurred. Required until the interactive picker
+                     (🎯T2) lands.
   --interval SECS    Seconds between captures. Floating-point. Default: 2.
   --threshold N      Minimum pHash Hamming distance from the last saved
                      frame required to save a new frame. Default: 10.
@@ -28,17 +33,19 @@ OPTIONS
   --help-agent       Print this machine-oriented help and exit.
 
 EXIT CODES
-  0   Clean exit (including --version, --help, --help-agent).
-  2   Capture logic not yet implemented (current status during 🎯T1.1).
-      Will become the "invalid argument" code once capture lands.
+  0   Clean exit (including --version, --help, --help-agent, and a
+      successful capture).
+  1   Runtime error (permission denied, region off-screen, backend
+      failure, PNG encode failure).
+  2   clap-level argument parse error (wrong flag, malformed value).
 
-OUTPUT CONTRACT (once capture is implemented)
+OUTPUT CONTRACT
   One line is written to stdout per saved PNG, formatted as:
       <absolute-path>\n
   Downstream consumers (e.g. the T5 feeder) tail this stream.
 
 PLATFORM STATUS
-  macOS arm64   primary target (🎯T1.2, 🎯T1.3 in progress)
+  macOS arm64   primary target (🎯T1.2 complete; 🎯T1.3 in progress)
   Windows       planned (🎯T6)
   Linux X11     planned best-effort (🎯T7)
 

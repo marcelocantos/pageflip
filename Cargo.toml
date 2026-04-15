@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+xcap = "0.9"
 
 [profile.release]
 lto = "thin"
