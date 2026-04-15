@@ -359,52 +359,54 @@ targets:
     discovered: 2026-04-14
     achieved: 2026-04-15
   T9.1:
-    name: pageflip captures system audio to a WAV file alongside frames on macOS
+    name: Live audio is captured and piped to an in-process Transcriber — no audio ever written to disk or network
     status: identified
     value: 8.0
     cost: 3.0
     observable: true
     acceptance:
-    - System audio is captured on macOS via ScreenCaptureKit's audio stream, independently of frame capture
-    - '`pageflip --audio --output <dir>` writes an `audio.wav` file in the output directory while the capture loop runs'
-    - WAV is 16-bit PCM at 48 kHz stereo (or whatever ScreenCaptureKit natively delivers, documented in --help-agent)
-    - Stopping pageflip with Ctrl-C finalises the WAV header cleanly (no truncated/broken file)
-    - Audio capture failures (e.g., permission denied) surface a useful error without crashing the frame loop
-    context: 'First sub-target split out of T9. Delivers the raw audio signal in a consumable container (WAV). Downstream targets (T9.2 transcription, T9.3 diarisation) build on this. Observable checkpoint: a playable audio.wav file that the user can open in QuickTime and hear the meeting audio. Requires objc2-screencapturekit or direct Apple FFI bindings; xcap does not expose audio.'
+    - System audio is captured via macOS ScreenCaptureKit's audio stream
+    - Captured buffers are delivered to a `Transcriber` trait living inside `src/audio/`; the raw-audio type is crate-private and does not implement Serialize, file-write, or any network trait
+    - No code path writes audio samples to disk (no WAV, no raw, no cache, no temp) and no code path ships audio samples to a network endpoint — enforced at the module / type boundary, not by convention
+    - Starting capture with `--audio` requires a configured Transcriber; otherwise pageflip exits with a readable error before opening the audio device
+    - A `NullTranscriber` exists (discards samples) so unit tests and dry runs do not require a real Whisper model
+    - Audio-capture failures (e.g. TCC denial) surface a useful error without crashing the frame loop
+    context: 'First sub-target of T9. Hard legal/policy constraint from the project owner: audio may be USED to derive transcripts in real time, but MUST NEVER be recorded to disk or transmitted anywhere. This target enforces that constraint architecturally — the raw-audio type stays crate-private inside `src/audio/` and the only thing that can leave that module is a transcript segment. Observable checkpoint: with `--audio --transcriber null`, capture runs, the null transcriber receives samples, and no audio file is ever produced in the output dir.'
     depends_on:
     - T1.3
     origin: manual
     discovered: 2026-04-15
   T9.2:
-    name: Captured audio is transcribed locally via Whisper into timestamped text segments
+    name: Whisper Transcriber runs fully offline and streams transcript segments to transcript.jsonl
     status: identified
     value: 8.0
     cost: 3.0
     observable: true
     acceptance:
-    - A local Whisper integration (distil-large-v3 or large-v3-turbo by default, large-v3 optional) transcribes the captured audio.wav
-    - Transcription runs at ≥ 5x real-time on a 16-GPU M4 with 48 GB RAM
-    - Transcript segments are written as `transcript.jsonl` in the output directory with `{start_ms, end_ms, text}` rows
-    - Model path / preset is configurable via CLI or config file; first-run downloads the model from a known mirror
-    - Transcription can run live (streaming) OR post-hoc on the final audio.wav — document which mode is shipped
-    context: 'Second sub-target of T9. Turns the raw WAV into searchable, structured transcript segments. Uses whisper-rs (Rust bindings for whisper.cpp) or a similar local inference path. Model sizing tuned for the user''s 48 GB / 16-GPU work machine. Observable checkpoint: transcript.jsonl the user can read with `jq`. Diarisation and slide alignment come in T9.3.'
+    - A `WhisperTranscriber` implements the T9.1 Transcriber trait using whisper.cpp via whisper-rs, running entirely in-process on local hardware
+    - 'Inference is fully offline: the only network activity permitted at runtime is the initial model download on first use, and that download is gated by an explicit flag (default: download allowed from a known mirror; `--no-network` disables it and fails fast if the model is absent)'
+    - 'After bootstrap, a `--no-network` check is enforced: pageflip refuses to hit the network for transcription even if some future code path tries to'
+    - Transcript segments land in `transcript.jsonl` in the output directory with `{start_ms, end_ms, text}` rows, flushed per segment so tailing consumers see them immediately
+    - Model selection (distil-large-v3 default, large-v3-turbo or large-v3 optional) is configurable via CLI flag and config file; default targets the user's 48 GB M-series work machine
+    - Achieves ≥ 5x real-time throughput on a 16-GPU M4 with 48 GB RAM
+    context: 'Second sub-target of T9. Turns the live audio stream from T9.1 into structured transcript text, enforcing the no-wire constraint at the inference layer. Whisper runs entirely locally via whisper.cpp bindings — no SaaS transcription API is ever called. The only permitted network activity is the one-time model download, and that is gated so an offline-first workflow can disable it. Observable: `transcript.jsonl` growing in real time as speech is detected.'
     depends_on:
     - T9.1
     origin: manual
     discovered: 2026-04-15
   T9.3:
-    name: Transcript segments carry speaker attribution and slide alignment
+    name: Transcript segments gain speaker IDs (local diarisation) and slide alignment
     status: identified
     value: 8.0
     cost: 5.0
     observable: true
     acceptance:
-    - Speaker diarisation assigns stable speaker IDs per utterance (pyannote.audio via a subprocess, or equivalent Rust-callable tool)
-    - Each transcript segment is tagged with the slide_id visible at `t_start` (joining against the PNG stream's mtime/timestamp)
-    - Optional config maps speaker IDs to display names
-    - '`transcript.jsonl` rows grow to `{slide_id, t_start_ms, t_end_ms, text, speaker_id}` without breaking existing consumers'
-    - Diarisation cost does not block real-time capture — runs as a post-processing pass OR asynchronously
-    context: Third sub-target of T9. Joins the transcript to the slide stream (so T12's meeting artifact can render a time-aligned transcript next to slides) and adds speaker IDs (so T14 can attribute contradictions and T13 can know who said what). Together T9.1+T9.2+T9.3 satisfy the original T9 acceptance; retiring this sub-target should retire T9.
+    - Speaker diarisation runs inside `src/audio/` (same module that holds the raw audio buffers, so the no-egress invariant is preserved) — pyannote.audio via a bundled subprocess, a Rust-native diariser, or equivalent
+    - Diarisation assigns stable speaker IDs per utterance; optional config maps IDs to display names
+    - All diarisation happens locally — no audio or audio-derived embedding is ever sent to a network endpoint
+    - Each transcript.jsonl row is enriched to `{slide_id, t_start_ms, t_end_ms, text, speaker_id}` by joining the captured PNG stream's timestamps against segment intervals
+    - Diarisation cost does not block real-time capture — runs as an async post-processing pass on each segment, or as a finalisation step at stop-time
+    context: 'Third sub-target of T9. Brings speaker attribution and slide alignment online, preserving the T9.1 architectural boundary — because diarisation needs audio embeddings, it MUST live inside `src/audio/` (the only module allowed to touch raw audio). Slide alignment is a pure join against PNG mtimes and can live anywhere. Observable: transcript.jsonl rows show `speaker_id` + `slide_id` fields; playing back a recent meeting lets the user jump to a slide and see who said what.'
     depends_on:
     - T9.2
     origin: manual
