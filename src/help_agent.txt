@@ -12,6 +12,9 @@ INVOCATION
   pageflip --window                  # interactive window picker on stdin
   pageflip --window-title SUBSTRING
   pageflip --window-id ID
+  pageflip --window --crop           # pick window then drag a crop rectangle
+  pageflip --window-title T --crop
+  pageflip --window-id ID  --crop
   pageflip --list-windows            # print visible windows and exit
   pageflip                           # no target flag → interactive region picker
   pageflip --version
@@ -28,6 +31,15 @@ OPTIONS
                      200x200 region yields a 400x400 PNG — full-resolution,
                      not blurred. Required until the interactive picker
                      (🎯T2) lands.
+  --crop             After resolving a window target, take a one-shot snapshot
+                     of the window and open an interactive crop picker. The
+                     user drags a rectangle on the snapshot; the selection is
+                     stored as fractional (0.0–1.0) window-relative coordinates.
+                     Every subsequent capture crops the same logical sub-region,
+                     so the crop tracks the window even if it resizes. Requires
+                     one of --window, --window-title, or --window-id. Mutually
+                     exclusive with --region. The output PNGs contain only the
+                     cropped sub-image.
   --interval SECS    Seconds between captures. Floating-point. Default: 2.
   --threshold N      Minimum pHash Hamming distance from the last saved
                      frame required to save a new frame. Default: 10.
@@ -57,9 +69,15 @@ LOOP BEHAVIOUR
   immediately. Ctrl-C (SIGINT) breaks the loop after the in-flight
   capture completes and exits 0.
 
+  When --crop is active, each tick captures the full window then crops to
+  the stored fractional rectangle before hashing and saving. The crop is
+  re-computed from the fractional spec on every tick, so if the window
+  resizes the cropped region covers the same proportional sub-area.
+
 PLATFORM STATUS
-  macOS arm64   🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T2, 🎯T3 complete
-                (region capture, dedup loop, region picker, window capture)
+  macOS arm64   🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T2, 🎯T3, 🎯T4 complete
+                (region capture, dedup loop, region picker, window capture,
+                 window-relative crop)
   Windows       planned (🎯T6)
   Linux X11     planned best-effort (🎯T7)
 

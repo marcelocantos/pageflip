@@ -7,6 +7,38 @@ use std::path::Path;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+/// A window-relative crop rectangle expressed as fractional coordinates in
+/// [0.0, 1.0].  Stored at snapshot time and re-applied every tick so the crop
+/// follows the window if it resizes.
+#[derive(Clone, Copy, Debug)]
+pub struct CropSpec {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl CropSpec {
+    /// Convert to pixel offsets (left, top, width, height) for a frame of
+    /// the given physical dimensions.  All values are clamped so the crop
+    /// stays within the frame; a zero-area result is an error (degenerate spec).
+    pub fn to_pixels(self, width: u32, height: u32) -> Result<(u32, u32, u32, u32), String> {
+        let x = (self.x.clamp(0.0, 1.0) * width as f32).round() as u32;
+        let y = (self.y.clamp(0.0, 1.0) * height as f32).round() as u32;
+        let right = ((self.x + self.w).clamp(0.0, 1.0) * width as f32).round() as u32;
+        let bottom = ((self.y + self.h).clamp(0.0, 1.0) * height as f32).round() as u32;
+        let pw = right.saturating_sub(x);
+        let ph = bottom.saturating_sub(y);
+        if pw == 0 || ph == 0 {
+            return Err(format!(
+                "crop spec ({}, {}, {}, {}) produces zero-area region at {}x{}",
+                self.x, self.y, self.w, self.h, width, height
+            ));
+        }
+        Ok((x, y, pw, ph))
+    }
+}
+
 /// A rectangle on the virtual desktop in screen pixels.
 ///
 /// `x` and `y` are absolute coordinates relative to the primary monitor's
@@ -77,6 +109,35 @@ pub trait Capture {
     /// `Err(AmbiguousWindow)` when a `TitleContains`/`TitleExact` spec matches
     /// more than one window.
     fn capture_window(&self, spec: &WindowSpec) -> Result<Frame, CaptureError>;
+
+    /// Capture `spec` and apply `crop`, returning only the cropped sub-image.
+    ///
+    /// The default implementation captures the full window then crops in-process
+    /// using the `image` crate.  Platform impls may override for efficiency.
+    fn capture_window_cropped(
+        &self,
+        spec: &WindowSpec,
+        crop: &CropSpec,
+    ) -> Result<Frame, CaptureError> {
+        let frame = self.capture_window(spec)?;
+        let (cx, cy, cw, ch) = crop
+            .to_pixels(frame.width, frame.height)
+            .map_err(CaptureError::BackendFailed)?;
+
+        // SAFETY: pixel buffer dimensions match frame.width × frame.height by
+        // construction; xcap always delivers complete RGBA buffers.
+        let img: xcap::image::RgbaImage =
+            xcap::image::ImageBuffer::from_raw(frame.width, frame.height, frame.rgba).ok_or_else(
+                || CaptureError::EncodeFailed("invalid pixel buffer for crop".to_string()),
+            )?;
+
+        let cropped = xcap::image::imageops::crop_imm(&img, cx, cy, cw, ch).to_image();
+        Ok(Frame {
+            width: cropped.width(),
+            height: cropped.height(),
+            rgba: cropped.into_raw(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -212,5 +273,84 @@ mod tests {
     fn window_not_found_error_includes_spec() {
         let err = CaptureError::WindowNotFound("title=\"Foo\"".to_string());
         assert!(err.to_string().contains("Foo"));
+    }
+
+    // --- CropSpec tests ---
+
+    #[test]
+    fn crop_spec_full_frame() {
+        let c = CropSpec {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        };
+        let (x, y, w, h) = c.to_pixels(400, 300).unwrap();
+        assert_eq!((x, y, w, h), (0, 0, 400, 300));
+    }
+
+    #[test]
+    fn crop_spec_centre_quarter() {
+        let c = CropSpec {
+            x: 0.25,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+        };
+        let (x, y, w, h) = c.to_pixels(400, 200).unwrap();
+        assert_eq!((x, y, w, h), (100, 50, 200, 100));
+    }
+
+    #[test]
+    fn crop_spec_clamped_overflow() {
+        // right edge beyond 1.0 — should clamp, not panic
+        let c = CropSpec {
+            x: 0.9,
+            y: 0.0,
+            w: 0.5,
+            h: 1.0,
+        };
+        let (x, _y, w, _h) = c.to_pixels(100, 100).unwrap();
+        assert_eq!(x, 90);
+        assert_eq!(w, 10); // clamped to frame edge
+    }
+
+    #[test]
+    fn crop_spec_zero_area_rejected() {
+        let c = CropSpec {
+            x: 0.5,
+            y: 0.5,
+            w: 0.0,
+            h: 0.5,
+        };
+        assert!(c.to_pixels(100, 100).is_err());
+    }
+
+    #[test]
+    fn crop_spec_degenerate_tiny_frame() {
+        // 1×1 pixel; centre quarter rounds to zero area → error
+        let c = CropSpec {
+            x: 0.25,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+        };
+        // For a 1×1 frame: x=round(0.25)=0, right=round(0.75)=1 → w=1; ok actually
+        let result = c.to_pixels(1, 1);
+        assert!(result.is_ok());
+        let (x, y, w, h) = result.unwrap();
+        assert_eq!((x, y, w, h), (0, 0, 1, 1));
+    }
+
+    #[test]
+    fn crop_spec_x_greater_than_right_edge_zero_area() {
+        // w=0.0 means right == left → zero area
+        let c = CropSpec {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 1.0,
+        };
+        assert!(c.to_pixels(100, 100).is_err());
     }
 }

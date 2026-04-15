@@ -16,12 +16,14 @@ use std::time::Duration;
 use clap::Parser;
 use time::OffsetDateTime;
 
-use capture::{default_backend, Capture, Region, WindowSpec};
+use capture::{default_backend, Capture, CropSpec, Region, WindowSpec};
 use dedup::Dedup;
 
 enum Target {
     Region(Region),
     Window(WindowSpec),
+    /// Window captured every tick, output cropped to fractional sub-region.
+    WindowCropped(WindowSpec, CropSpec),
 }
 
 const HELP_AGENT: &str = include_str!("help_agent.txt");
@@ -61,6 +63,14 @@ struct Cli {
     /// Print the list of visible windows (id, app, title) and exit.
     #[arg(long)]
     list_windows: bool,
+
+    /// After resolving a window target, open a crop picker on a snapshot of
+    /// that window. The user drags a rectangle; the crop is stored as
+    /// fractional (0.0–1.0) window-relative coordinates and re-applied every
+    /// tick so the crop tracks the window if it resizes. Requires one of
+    /// --window, --window-title, or --window-id.
+    #[arg(long)]
+    crop: bool,
 
     /// Capture interval in seconds.
     #[arg(long, default_value_t = 2.0, value_name = "SECS")]
@@ -183,6 +193,11 @@ fn run(cli: &Cli) -> Result<(), String> {
             "pageflip: capturing window {:?} every {:.3}s (threshold {} bits); Ctrl-C to stop",
             spec, cli.interval, cli.threshold
         ),
+        Target::WindowCropped(spec, crop) => eprintln!(
+            "pageflip: capturing window {:?} crop ({:.3},{:.3},{:.3},{:.3}) \
+             every {:.3}s (threshold {} bits); Ctrl-C to stop",
+            spec, crop.x, crop.y, crop.w, crop.h, cli.interval, cli.threshold
+        ),
     };
 
     loop {
@@ -211,20 +226,41 @@ fn run(cli: &Cli) -> Result<(), String> {
 }
 
 fn resolve_target(cli: &Cli, backend: &dyn Capture) -> Result<Option<Target>, String> {
+    if cli.crop && cli.region.is_some() {
+        return Err("--crop requires a window target (--window, --window-title, or --window-id); use --region for a fixed absolute crop instead".to_string());
+    }
+    if cli.crop && !cli.window && cli.window_title.is_none() && cli.window_id.is_none() {
+        return Err("--crop requires one of --window, --window-title, or --window-id".to_string());
+    }
+
     if let Some(r) = cli.region {
         return Ok(Some(Target::Region(r.into())));
     }
-    if let Some(id) = cli.window_id {
-        return Ok(Some(Target::Window(WindowSpec::Id(id))));
+
+    // Resolve window spec from flags.
+    let window_spec = if let Some(id) = cli.window_id {
+        Some(WindowSpec::Id(id))
+    } else if let Some(title) = &cli.window_title {
+        Some(WindowSpec::TitleContains(title.clone()))
+    } else if cli.window {
+        pick_window_interactively(backend)?
+    } else {
+        None
+    };
+
+    if let Some(spec) = window_spec {
+        if cli.crop {
+            // Take a one-shot snapshot to show in the crop picker.
+            eprintln!("pageflip: snapshotting window for crop picker…");
+            let snapshot = backend.capture_window(&spec).map_err(|e| e.to_string())?;
+            match picker::pick_crop(&snapshot).map_err(|e| e.to_string())? {
+                Some(crop) => return Ok(Some(Target::WindowCropped(spec, crop))),
+                None => return Ok(None),
+            }
+        }
+        return Ok(Some(Target::Window(spec)));
     }
-    if let Some(title) = &cli.window_title {
-        return Ok(Some(Target::Window(WindowSpec::TitleContains(
-            title.clone(),
-        ))));
-    }
-    if cli.window {
-        return pick_window_interactively(backend).map(|opt| opt.map(Target::Window));
-    }
+
     // No target flags: fall back to the interactive region picker.
     match picker::pick_region().map_err(|e| e.to_string())? {
         Some(r) => Ok(Some(Target::Region(r))),
@@ -277,6 +313,7 @@ fn capture_once(
     let frame = match target {
         Target::Region(r) => backend.capture(*r),
         Target::Window(spec) => backend.capture_window(spec),
+        Target::WindowCropped(spec, crop) => backend.capture_window_cropped(spec, crop),
     }
     .map_err(|e| e.to_string())?;
     if !dedup.should_save(&frame) {

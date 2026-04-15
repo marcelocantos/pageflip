@@ -13,7 +13,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowId, WindowLevel};
 
-use crate::capture::Region;
+use crate::capture::{CropSpec, Frame, Region};
 
 #[derive(Debug)]
 pub enum PickerError {
@@ -289,6 +289,256 @@ fn draw_rect_outline(
                     buf[(y * width + tx) as usize] = colour;
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Crop picker — shows a snapshot of a captured window and lets the user drag
+// a rectangle over it; returns fractional (window-relative) coordinates.
+// ---------------------------------------------------------------------------
+
+/// Open a window showing `snapshot` and let the user drag a crop rectangle.
+/// Returns `Ok(Some(crop))` on release, `Ok(None)` on Escape / close.
+pub fn pick_crop(snapshot: &Frame) -> Result<Option<CropSpec>, PickerError> {
+    let event_loop = EventLoop::new().map_err(|e| PickerError::EventLoop(e.to_string()))?;
+    let mut app = CropPickerApp::new(snapshot);
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| PickerError::EventLoop(e.to_string()))?;
+    if let Some(err) = app.error {
+        return Err(err);
+    }
+    Ok(app.result)
+}
+
+struct CropPickerApp {
+    /// XRGB pixels converted from the snapshot RGBA for softbuffer rendering.
+    snapshot_xrgb: Vec<u32>,
+    snap_w: u32,
+    snap_h: u32,
+    window: Option<Rc<Window>>,
+    surface: Option<Surface<Rc<Window>, Rc<Window>>>,
+    pointer_px: Option<PhysicalPosition<f64>>,
+    start_px: Option<PhysicalPosition<f64>>,
+    result: Option<CropSpec>,
+    error: Option<PickerError>,
+}
+
+impl CropPickerApp {
+    fn new(snapshot: &Frame) -> Self {
+        // Convert RGBA → 0x00RRGGBB (softbuffer's expected format).
+        let snapshot_xrgb = snapshot
+            .rgba
+            .chunks_exact(4)
+            .map(|p| ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32))
+            .collect();
+        Self {
+            snapshot_xrgb,
+            snap_w: snapshot.width,
+            snap_h: snapshot.height,
+            window: None,
+            surface: None,
+            pointer_px: None,
+            start_px: None,
+            result: None,
+            error: None,
+        }
+    }
+
+    fn crop_from_drag(
+        &self,
+        a: PhysicalPosition<f64>,
+        b: PhysicalPosition<f64>,
+    ) -> Option<CropSpec> {
+        let fw = self.snap_w as f64;
+        let fh = self.snap_h as f64;
+        if fw == 0.0 || fh == 0.0 {
+            return None;
+        }
+        let x0 = (a.x.min(b.x) / fw).clamp(0.0, 1.0) as f32;
+        let y0 = (a.y.min(b.y) / fh).clamp(0.0, 1.0) as f32;
+        let x1 = (a.x.max(b.x) / fw).clamp(0.0, 1.0) as f32;
+        let y1 = (a.y.max(b.y) / fh).clamp(0.0, 1.0) as f32;
+        let w = x1 - x0;
+        let h = y1 - y0;
+        // Reject zero-area drags (will also fail to_pixels, but reject early).
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        Some(CropSpec { x: x0, y: y0, w, h })
+    }
+
+    fn render(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+
+        let Ok(mut buffer) = surface.buffer_mut() else {
+            return;
+        };
+
+        // Blit snapshot pixels into the buffer. The window is created at the
+        // snapshot's physical-pixel size so no scaling is needed.
+        let len = buffer.len().min(self.snapshot_xrgb.len());
+        buffer[..len].copy_from_slice(&self.snapshot_xrgb[..len]);
+        // Any leftover pixels (window larger than snapshot) stay black (0).
+        for px in buffer[len..].iter_mut() {
+            *px = 0;
+        }
+
+        // Draw rubber-band over the snapshot.
+        if let (Some(start_px), Some(cur_px)) = (self.start_px, self.pointer_px) {
+            let x0 = start_px.x.min(cur_px.x).round() as i32;
+            let y0 = start_px.y.min(cur_px.y).round() as i32;
+            let x1 = start_px.x.max(cur_px.x).round() as i32;
+            let y1 = start_px.y.max(cur_px.y).round() as i32;
+            draw_rect_outline(
+                &mut buffer,
+                size.width as i32,
+                size.height as i32,
+                Rect { x0, y0, x1, y1 },
+                0xFFFF66FF,
+                2,
+            );
+        }
+
+        window.pre_present_notify();
+        let _ = buffer.present();
+    }
+}
+
+impl ApplicationHandler for CropPickerApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        use winit::dpi::PhysicalSize;
+
+        let attrs = Window::default_attributes()
+            .with_title(
+                "pageflip crop picker — drag to select, Enter/release to confirm, Esc to cancel",
+            )
+            .with_decorations(true)
+            .with_resizable(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_inner_size(PhysicalSize::new(self.snap_w, self.snap_h));
+
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Rc::new(w),
+            Err(e) => {
+                self.error = Some(PickerError::Surface(e.to_string()));
+                event_loop.exit();
+                return;
+            }
+        };
+        window.set_cursor(CursorIcon::Crosshair);
+
+        let size = window.inner_size();
+
+        let context = match Context::new(window.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                self.error = Some(PickerError::Surface(e.to_string()));
+                event_loop.exit();
+                return;
+            }
+        };
+        let mut surface = match Surface::new(&context, window.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.error = Some(PickerError::Surface(e.to_string()));
+                event_loop.exit();
+                return;
+            }
+        };
+        if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+            if let Err(e) = surface.resize(w, h) {
+                self.error = Some(PickerError::Surface(e.to_string()));
+                event_loop.exit();
+                return;
+            }
+        }
+
+        self.window = Some(window);
+        self.surface = Some(surface);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.result = None;
+                            event_loop.exit();
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            // Confirm current drag if any.
+                            if let (Some(a), Some(b)) = (self.start_px, self.pointer_px) {
+                                if let Some(crop) = self.crop_from_drag(a, b) {
+                                    self.result = Some(crop);
+                                    event_loop.exit();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer_px = Some(position);
+                if self.start_px.is_some() {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => match state {
+                ElementState::Pressed => {
+                    self.start_px = self.pointer_px;
+                }
+                ElementState::Released => {
+                    if let (Some(a), Some(b)) = (self.start_px, self.pointer_px) {
+                        if let Some(crop) = self.crop_from_drag(a, b) {
+                            self.result = Some(crop);
+                            event_loop.exit();
+                            return;
+                        }
+                    }
+                    self.start_px = None;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            },
+            WindowEvent::RedrawRequested => {
+                self.render();
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(surface) = &mut self.surface {
+                    if let (Some(w), Some(h)) =
+                        (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                    {
+                        let _ = surface.resize(w, h);
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            _ => {}
         }
     }
 }
