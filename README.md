@@ -1,84 +1,122 @@
 # pageflip
 
-Poll a screen region every few seconds and save a PNG whenever the image
-changes meaningfully. Designed for capturing slides from live screen-shared
-meetings (Teams, Zoom, Meet) without having to record and post-process the
-whole video.
+Poll a screen region (or window) every few seconds and write a PNG whenever the
+image changes meaningfully. Designed to feed live slides from screen-shared
+meetings into a Claude Code session for real-time analysis.
 
-Uses a perceptual hash ([`ImageHash.phash`][phash]) to decide whether a new
-frame is "different enough" from the last one saved, so compression noise and
-subtle cursor movements don't produce duplicate captures.
+Uses a perceptual hash (pHash Hamming distance) to skip frames that differ only
+in cursor movement, compression noise, or animation mid-state.
 
-[phash]: https://github.com/JohnDoe/imagehash
-
-## Install
+## Installation
 
 ```bash
-uv tool install git+https://github.com/marcelocantos/pageflip
+brew install marcelocantos/tap/pageflip
 ```
 
-Or for a local checkout:
+This installs both `pageflip` (capture loop) and `pageflip-feed` (Claude feeder).
+
+For development from a local checkout:
 
 ```bash
-git clone https://github.com/marcelocantos/pageflip
-cd pageflip
-uv tool install .
+cargo install --path .
 ```
 
-On first run, macOS will prompt to grant **Screen Recording** permission to
-your terminal (System Settings → Privacy & Security → Screen Recording).
+## Gatekeeper on macOS
 
-## Use
+Pre-built release binaries are not code-signed yet (signing requires an Apple
+Developer account — tracked as future work). If macOS blocks the binary with
+"cannot be opened because the developer cannot be verified", remove the
+quarantine attribute:
 
-Interactive region picker, default cadence and threshold:
+```bash
+xattr -d com.apple.quarantine "$(which pageflip)" "$(which pageflip-feed)"
+```
+
+You need to do this once per install. The error appears because the binaries
+were downloaded from the internet, not installed from the App Store or a signed
+package. There is no security risk for software you built or installed yourself.
+
+Also grant **Screen Recording** permission on first run: System Settings →
+Privacy & Security → Screen Recording. pageflip exits with a readable error
+message if permission is denied.
+
+## Usage
+
+Capture a region interactively (draws a rubber-band overlay):
 
 ```bash
 pageflip
 ```
 
-Draw a rectangle around the slide area. Capture begins immediately; Ctrl-C
-to stop. Output lands in `./pageflip-YYYYMMDD-HHMMSS/`.
-
-With an explicit region (pixels, after any Retina scaling):
+Capture a fixed region:
 
 ```bash
 pageflip --region 400,200,1280,720 --interval 2 --threshold 10
 ```
 
-## Options
+Capture a specific window by title substring, writing output to a custom directory:
+
+```bash
+pageflip --window-title "Teams" --output ~/meetings/slides
+```
+
+Pick a window interactively:
+
+```bash
+pageflip --window
+```
+
+List available windows and their IDs:
+
+```bash
+pageflip --list-windows
+```
+
+Capture and feed each new slide into an active Claude Code session:
+
+```bash
+# Terminal 1: start capturing
+pageflip --window-title "Teams" --output /tmp/slides
+
+# Terminal 2: feed each new PNG into Claude
+pageflip-feed --watch /tmp/slides --session-id <session-id>
+```
+
+Find your session ID with `claude --list-sessions`.
+
+### Flag reference
+
+#### pageflip
 
 | Flag | Default | Notes |
 |---|---|---|
-| `-i`, `--interval` | `2.0` | Seconds between captures. |
-| `-t`, `--threshold` | `10` | Hamming-distance threshold. Lower → more captures. |
-| `-r`, `--region` | *(interactive)* | `x,y,w,h` in screen pixels. |
-| `-o`, `--output` | `./pageflip-<timestamp>/` | Output directory. |
-| `--hash-size` | `16` | pHash size; 16 → 256-bit hash. |
+| `--region X,Y,W,H` | *(interactive picker)* | Top-left x,y + width,height in logical screen points. |
+| `--window` | — | Interactive window picker. |
+| `--window-title SUBSTRING` | — | Attach to the first window whose title contains this. |
+| `--window-id ID` | — | Attach to the window with this numeric ID. |
+| `--list-windows` | — | Print visible windows and exit. |
+| `--interval SECS` | `2.0` | Capture cadence in seconds. |
+| `--threshold N` | `10` | Minimum pHash Hamming distance to save a frame. |
+| `--output DIR` | `./pageflip-<timestamp>/` | Output directory. |
 
-## Tuning the threshold
+#### pageflip-feed
 
-The hash is 256 bits (`--hash-size 16`). Hamming distance between two hashes
-roughly tracks how different the images look:
+| Flag | Default | Notes |
+|---|---|---|
+| `--watch DIR` | *(required)* | Directory to watch for new PNGs. |
+| `--session-id ID` | *(required)* | Claude Code session ID to resume. |
+| `--prompt TEMPLATE` | `Analyse this slide: @{path}` | Prompt sent per slide. `{path}` is replaced with the PNG path. |
+| `--claude PATH` | `claude` | Path to the `claude` binary. |
 
-- `< 5` — near-identical, compression noise only
-- `5–10` — cursor movement, small UI changes, animation mid-frame
-- `10–20` — new slide, new diagram, substantial content change
-- `> 20` — completely different content
+## Development
 
-Default threshold of `10` works well for most slide decks. Raise it if you
-get duplicates from animated slides; lower it if subtle slide changes (e.g. a
-new bullet appearing) are being missed.
+`make bullseye` is the standing invariant gate — it runs `cargo fmt --check`,
+`cargo clippy --release -- -D warnings`, `cargo build --release`, and
+`cargo test`. All four must be green before any merge.
 
-## How it works
-
-Every `--interval` seconds:
-
-1. Grab the region via `mss`.
-2. Compute a perceptual hash.
-3. Compare against the hash of the **last saved** frame (not the last
-   captured frame) — so a slow fade-in still resolves to one capture.
-4. If the Hamming distance exceeds the threshold, save as PNG and update the
-   reference hash.
+```bash
+make bullseye
+```
 
 ## License
 

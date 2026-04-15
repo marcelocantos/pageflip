@@ -8,6 +8,8 @@ license = "Apache-2.0"
 description = "Capture slides from a screen region whenever they change"
 repository = "https://github.com/marcelocantos/pageflip"
 readme = "README.md"
+keywords = ["screenshot", "screen-capture", "slides", "meeting", "perceptual-hash"]
+categories = ["command-line-utilities", "multimedia"]
 
 [[bin]]
 name = "pageflip"
