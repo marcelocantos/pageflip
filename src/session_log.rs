@@ -34,6 +34,11 @@ pub struct WindowInfo {
 
 // ── Error codes ──────────────────────────────────────────────────────────────
 
+// Variants are part of the stable log-event schema — emitted only when
+// specific failure modes land in the audio path. Dead-code lint isn't the
+// right signal here; the variants exist to reserve a shape for downstream
+// consumers, not because they're needed at the current call sites.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioErrorCode {
@@ -61,6 +66,11 @@ impl fmt::Display for AudioErrorCode {
 ///
 /// No window titles, no OCR text, no transcript text, no specialist output,
 /// no frontmost-app display names — only numerics, enums, and hashes.
+///
+/// Unused variants are reserved for future wiring (🎯T9.2 audio-path events
+/// beyond the capture loop, 🎯T10.2 OCR-path events). Leaving them on dead_code
+/// keeps the schema stable while the codebase grows into them.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LogEvent {
@@ -101,10 +111,7 @@ pub enum LogEvent {
         channels: u8,
     },
     /// Audio capture or transcription encountered an error.
-    AudioError {
-        t_ms: u64,
-        code: AudioErrorCode,
-    },
+    AudioError { t_ms: u64, code: AudioErrorCode },
     /// A redactor was invoked on a frame.
     RedactInvoked {
         t_ms: u64,
@@ -113,10 +120,7 @@ pub enum LogEvent {
         duration_ms: u64,
     },
     /// Transcription of a batch started.
-    TranscribeStart {
-        t_ms: u64,
-        model: String,
-    },
+    TranscribeStart { t_ms: u64, model: String },
     /// Transcription of a batch completed.
     TranscribeEnd {
         t_ms: u64,
@@ -174,8 +178,7 @@ impl SessionLog {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let salt = format!("{}.{}", now.as_secs(), now.subsec_nanos())
-            .into_bytes();
+        let salt = format!("{}.{}", now.as_secs(), now.subsec_nanos()).into_bytes();
         Ok(Self { writer, salt })
     }
 

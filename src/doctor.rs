@@ -36,7 +36,7 @@ fn push_versions(out: &mut String) {
     let sha = env!("PAGEFLIP_GIT_SHA");
     out.push_str("# pageflip doctor\n\n");
     out.push_str("## Versions\n\n");
-    out.push_str(&format!("| Key | Value |\n|-----|-------|\n"));
+    out.push_str("| Key | Value |\n|-----|-------|\n");
     out.push_str(&format!("| pageflip | {version} ({sha}) |\n"));
     out.push_str(&format!(
         "| rustc | {} |\n",
@@ -49,7 +49,7 @@ fn push_versions(out: &mut String) {
 
 fn push_system(out: &mut String) {
     out.push_str("## System\n\n");
-    out.push_str(&format!("| Key | Value |\n|-----|-------|\n"));
+    out.push_str("| Key | Value |\n|-----|-------|\n");
 
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -229,11 +229,16 @@ fn probe_microphone() -> &'static str {
         .args([
             "-y",
             "-hide_banner",
-            "-loglevel", "quiet",
-            "-f", "avfoundation",
-            "-i", ":0",
-            "-t", "0.1",
-            "-f", "null",
+            "-loglevel",
+            "quiet",
+            "-f",
+            "avfoundation",
+            "-i",
+            ":0",
+            "-t",
+            "0.1",
+            "-f",
+            "null",
             "-",
         ])
         .output();
@@ -298,16 +303,13 @@ fn push_auth(out: &mut String) {
 }
 
 fn probe_hf_auth() -> &'static str {
-    let result = Command::new("huggingface-cli")
-        .args(["whoami"])
-        .output();
+    let result = Command::new("huggingface-cli").args(["whoami"]).output();
     match result {
         Ok(o) if o.status.success() => "present",
         Ok(_) => "absent",
         Err(_) => {
             // huggingface-cli not installed; check env var (bool only)
-            if std::env::var("HUGGING_FACE_HUB_TOKEN").is_ok()
-                || std::env::var("HF_TOKEN").is_ok()
+            if std::env::var("HUGGING_FACE_HUB_TOKEN").is_ok() || std::env::var("HF_TOKEN").is_ok()
             {
                 "present (env var)"
             } else {
@@ -382,7 +384,11 @@ fn tool_version_line(argv: &[&str]) -> String {
             if first.is_empty() {
                 let err = String::from_utf8_lossy(&o.stderr);
                 let eline = err.lines().next().unwrap_or("error").trim().to_string();
-                if eline.is_empty() { "error".to_string() } else { eline }
+                if eline.is_empty() {
+                    "error".to_string()
+                } else {
+                    eline
+                }
             } else {
                 first
             }

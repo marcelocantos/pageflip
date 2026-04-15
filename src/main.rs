@@ -461,6 +461,7 @@ fn print_window_list(backend: &dyn Capture) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_once(
     backend: &dyn Capture,
     target: &Target,
