@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Audio invariant clarification
+    url: https://github.com/marcelocantos/pageflip/blob/master/docs/bug-report.md
+    about: Before filing, check the bug-report walkthrough and the audio-no-record constraint.

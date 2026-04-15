@@ -112,11 +112,30 @@ Find your session ID with `claude --list-sessions`.
 
 `make bullseye` is the standing invariant gate — it runs `cargo fmt --check`,
 `cargo clippy --release -- -D warnings`, `cargo build --release`, and
-`cargo test`. All four must be green before any merge.
+`cargo test --release`. All four must be green before any merge.
 
 ```bash
 make bullseye
 ```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full contributor workflow,
+including model-weight bootstrap and the audio invariant.
+
+## Reporting bugs
+
+`pageflip doctor` prints a markdown diagnostic (versions, permission states,
+model cache inventory, recent session tail) designed to be pasted into a
+GitHub issue. It deliberately excludes meeting content, window titles, OCR
+text, and transcript text — safe to paste.
+
+```bash
+pageflip doctor > report.md
+meetcat doctor >> report.md   # if applicable
+```
+
+File issues using the [Bug report template](.github/ISSUE_TEMPLATE/bug_report.yml);
+it prompts for these fields. See [`docs/bug-report.md`](docs/bug-report.md)
+for the end-to-end flow.
 
 ## License
 

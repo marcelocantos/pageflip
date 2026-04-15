@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest a new capability or enhancement.
+title: "[feat] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What are you trying to do, and why?
+      placeholder: "I want pageflip to also capture chat-pane messages from a specific region of a Teams window, so meetcat's resolver can pick up ad-hoc URLs shared mid-meeting."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: What would the feature look like from a user's perspective?
+      placeholder: "An additional --chat-region X,Y,W,H flag that captures a second region and tags events with kind=chat."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you tried anything else? What didn't work?
+
+  - type: dropdown
+    id: audio-invariant
+    attributes:
+      label: Does this feature interact with the audio invariant?
+      description: |
+        The project has a hard rule: raw audio bytes must never be written to
+        disk or transmitted over the network. Only transcript text derived
+        from local Whisper may leave memory.
+      options:
+        - "No — doesn't touch audio at all"
+        - "Uses transcript text only"
+        - "Might require raw audio access (explain in proposal)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Relevant issues, links, prior art.

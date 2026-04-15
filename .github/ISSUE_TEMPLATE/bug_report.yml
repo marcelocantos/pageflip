@@ -1,0 +1,88 @@
+name: Bug report
+description: File a bug report with diagnostic output from `pageflip doctor`.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        Before submitting, please run the diagnostic commands below and paste
+        the output into the respective sections. Their output is designed to
+        be paste-safe — it contains only non-sensitive information (versions,
+        counts, permission states, error codes) and deliberately excludes
+        meeting content, window titles, OCR, and transcript text.
+
+        See `docs/bug-report.md` in the repo for the full flow.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing the problem.
+      placeholder: e.g. "pageflip --audio --transcriber whisperx exits with 'stop_capture returned error' after ~30 s."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: The exact command line(s) you ran and what you observed.
+      placeholder: |
+        1. `pageflip --region 0,0,800,600 --interval 2 --audio --transcriber whisperx --output /tmp/mtg`
+        2. Speak for about 30 seconds, press Ctrl-C.
+        3. The transcript.jsonl file is empty, stderr shows …
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: pageflip-doctor
+    attributes:
+      label: pageflip doctor output
+      description: Paste the output of `pageflip doctor`. Safe to paste — no content is included.
+      placeholder: $ pageflip doctor
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: meetcat-doctor
+    attributes:
+      label: meetcat doctor output (if applicable)
+      description: If you were running meetcat, paste the output of `meetcat doctor`.
+      placeholder: $ meetcat doctor
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: session-log-tail
+    attributes:
+      label: Session log tail (last 200 lines)
+      description: |
+        If you ran pageflip or meetcat with `--log-file <PATH>`, paste the
+        last 200 lines. This is the structured NDJSON log — no content,
+        just event types + counts + durations.
+      placeholder: tail -200 /path/to/session.log.jsonl
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions (if not captured in doctor output)
+      description: e.g. "pageflip 0.1.0-gabc123 on macOS 26.1, Apple M4 Max"
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Anything else we should know — prior workarounds, screenshots (please scrub first), related issues.
+    validations:
+      required: false
