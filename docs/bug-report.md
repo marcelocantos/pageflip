@@ -8,10 +8,15 @@ OCR, no transcripts.
 ## TL;DR
 
 ```bash
-pageflip doctor > report.md
-meetcat doctor >> report.md          # optional — only if meetcat was running
-pageflip doctor --log ~/.local/share/pageflip/session.ndjson >> report.md
+pageflip doctor \
+  --log         ~/.local/share/pageflip/session.ndjson \
+  --meetcat-log ~/.local/share/pageflip/meetcat.ndjson \
+  > report.md
 ```
+
+`pageflip doctor` auto-invokes `meetcat doctor` when it finds meetcat on
+`$PATH` and appends its output. Pass `--no-meetcat` to skip. Omit either
+log flag if you didn't set it on the failing run.
 
 Paste `report.md` into a new issue using the
 [Bug report template](../.github/ISSUE_TEMPLATE/bug_report.yml).
@@ -31,7 +36,10 @@ Emits a markdown report covering:
 - External tool versions (tmux, ffmpeg, uv, python3, claude, go)
 - HF token + Anthropic auth presence (boolean — never the secret)
 
-## 2. `meetcat doctor` (if applicable)
+## 2. `meetcat doctor` (auto-invoked by pageflip doctor)
+
+`pageflip doctor` runs `meetcat doctor` for you when `meetcat` is on
+`$PATH`. If you want meetcat's doctor standalone:
 
 ```bash
 meetcat doctor

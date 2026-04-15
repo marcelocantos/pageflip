@@ -10,9 +10,12 @@ use std::time::Duration;
 
 /// Run `pageflip doctor`.
 ///
-/// Writes a markdown report to stdout.  Optionally tails `log_path` at the
-/// end of the report.
-pub fn run(log_path: Option<&Path>) {
+/// Writes a markdown report to stdout. Optionally tails `log_path` at the
+/// end of the report. Unless `skip_meetcat` is set, also invokes
+/// `meetcat doctor` (passing `meetcat_log` through as --log-file) and
+/// appends its output so a single command produces the full bug-report
+/// bundle.
+pub fn run(log_path: Option<&Path>, meetcat_log: Option<&Path>, skip_meetcat: bool) {
     let mut out = String::with_capacity(4096);
 
     push_versions(&mut out);
@@ -26,7 +29,64 @@ pub fn run(log_path: Option<&Path>) {
         push_session_log(&mut out, path);
     }
 
+    if !skip_meetcat {
+        push_meetcat(&mut out, meetcat_log);
+    }
+
     print!("{out}");
+}
+
+// ── meetcat passthrough ──────────────────────────────────────────────────────
+
+fn push_meetcat(out: &mut String, log: Option<&Path>) {
+    out.push_str("\n---\n\n");
+    match which("meetcat") {
+        None => {
+            out.push_str("# meetcat doctor\n\n");
+            out.push_str(
+                "meetcat not found on `$PATH`. If you were running meetcat\n\
+                 alongside pageflip, install it and re-run `pageflip doctor`,\n\
+                 or run `meetcat doctor` separately and append its output.\n",
+            );
+        }
+        Some(path) => {
+            let mut cmd = Command::new(&path);
+            cmd.arg("doctor");
+            if let Some(l) = log {
+                cmd.arg("--log-file").arg(l);
+            }
+            match cmd.output() {
+                Ok(o) if o.status.success() => {
+                    out.push_str(&String::from_utf8_lossy(&o.stdout));
+                }
+                Ok(o) => {
+                    out.push_str("# meetcat doctor\n\n");
+                    out.push_str(&format!(
+                        "`meetcat doctor` exited with status {:?}. stderr:\n\n```\n{}\n```\n",
+                        o.status.code(),
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ));
+                }
+                Err(e) => {
+                    out.push_str("# meetcat doctor\n\n");
+                    out.push_str(&format!("failed to invoke `{}`: {e}\n", path.display()));
+                }
+            }
+        }
+    }
+}
+
+/// Best-effort $PATH lookup. Returns the first entry that exists and is
+/// executable; None if nothing matches. Avoids pulling in a `which` crate.
+fn which(cmd: &str) -> Option<PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join(cmd);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 // ── Versions ─────────────────────────────────────────────────────────────────

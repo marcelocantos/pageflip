@@ -43,9 +43,16 @@ const HELP_AGENT: &str = include_str!("help_agent.txt");
 enum Cmd {
     /// Print a markdown diagnostics report for bug reports.
     Doctor {
-        /// Tail the last 200 lines of this session log into the report.
+        /// Tail the last 200 lines of pageflip's session log into the report.
         #[arg(long, value_name = "PATH")]
         log: Option<PathBuf>,
+        /// Tail the last 200 lines of meetcat's session log into the report
+        /// (passed through to `meetcat doctor --log-file`).
+        #[arg(long, value_name = "PATH")]
+        meetcat_log: Option<PathBuf>,
+        /// Skip invoking `meetcat doctor` even if it is on PATH.
+        #[arg(long)]
+        no_meetcat: bool,
     },
 }
 
@@ -199,8 +206,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    if let Some(Cmd::Doctor { log }) = &cli.command {
-        doctor::run(log.as_deref());
+    if let Some(Cmd::Doctor {
+        log,
+        meetcat_log,
+        no_meetcat,
+    }) = &cli.command
+    {
+        doctor::run(log.as_deref(), meetcat_log.as_deref(), *no_meetcat);
         return ExitCode::SUCCESS;
     }
 
