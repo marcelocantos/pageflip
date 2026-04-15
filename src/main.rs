@@ -4,8 +4,6 @@
 mod capture;
 mod dedup;
 mod picker;
-// The redact module is a library layer not yet wired into the capture loop.
-#[allow(dead_code, unused_imports)]
 mod redact;
 
 use std::io::{self, Write};
@@ -21,6 +19,7 @@ use time::OffsetDateTime;
 
 use capture::{default_backend, Capture, CropSpec, Region, WindowSpec};
 use dedup::Dedup;
+use redact::{FaceBlurRedactor, RedactPipeline, Redactor};
 
 enum Target {
     Region(Region),
@@ -86,6 +85,10 @@ struct Cli {
     /// Output directory for captured PNGs.
     #[arg(long, value_name = "DIR")]
     output: Option<PathBuf>,
+
+    /// Blur detected faces in every saved frame using Apple Vision (macOS).
+    #[arg(long)]
+    redact_faces: bool,
 
     /// Print agent-oriented help (machine-readable invocation notes) and exit.
     #[arg(long, exclusive = true)]
@@ -184,6 +187,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         .map_err(|e| format!("could not create output directory {output_dir:?}: {e}"))?;
 
     let mut dedup = Dedup::new(cli.threshold);
+    let redact = build_redact_pipeline(cli);
 
     let stop = install_signal_handler()?;
 
@@ -206,7 +210,7 @@ fn run(cli: &Cli) -> Result<(), String> {
     loop {
         let tick_start = std::time::Instant::now();
 
-        capture_once(backend.as_ref(), &target, &mut dedup, &output_dir)?;
+        capture_once(backend.as_ref(), &target, &mut dedup, &redact, &output_dir)?;
 
         let remaining = interval.saturating_sub(tick_start.elapsed());
         if remaining.is_zero() {
@@ -311,6 +315,7 @@ fn capture_once(
     backend: &dyn Capture,
     target: &Target,
     dedup: &mut Dedup,
+    redact: &Option<RedactPipeline>,
     output_dir: &Path,
 ) -> Result<(), String> {
     let frame = match target {
@@ -322,6 +327,10 @@ fn capture_once(
     if !dedup.should_save(&frame) {
         return Ok(());
     }
+    let frame = match redact {
+        Some(pipeline) => pipeline.apply(frame).map_err(|e| e.to_string())?,
+        None => frame,
+    };
     let filename = format!("{}.png", timestamp_slug());
     let path = output_dir.join(filename);
     frame.save_png(&path).map_err(|e| e.to_string())?;
@@ -336,6 +345,16 @@ fn capture_once(
         .and_then(|_| stdout.flush())
         .map_err(|e| format!("stdout write failed: {e}"))?;
     Ok(())
+}
+
+fn build_redact_pipeline(cli: &Cli) -> Option<RedactPipeline> {
+    if !cli.redact_faces {
+        return None;
+    }
+    let mut pipeline = RedactPipeline::new();
+    let face: Box<dyn Redactor> = Box::new(FaceBlurRedactor::default());
+    pipeline.push(face);
+    Some(pipeline)
 }
 
 /// Installs a Ctrl-C handler that sends one message on the returned receiver

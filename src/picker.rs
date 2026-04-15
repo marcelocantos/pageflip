@@ -197,19 +197,12 @@ impl PickerApp {
         a: PhysicalPosition<f64>,
         b: PhysicalPosition<f64>,
     ) -> Option<Region> {
-        let scale = self.scale_factor;
-        let ax = a.x / scale;
-        let ay = a.y / scale;
-        let bx = b.x / scale;
-        let by = b.y / scale;
-        let x = ax.min(bx).round() as i32 + self.monitor_origin.0;
-        let y = ay.min(by).round() as i32 + self.monitor_origin.1;
-        let w = (ax - bx).abs().round() as u32;
-        let h = (ay - by).abs().round() as u32;
-        if w == 0 || h == 0 {
-            return None;
-        }
-        Some(Region { x, y, w, h })
+        compute_region(
+            (a.x, a.y),
+            (b.x, b.y),
+            self.scale_factor,
+            self.monitor_origin,
+        )
     }
 
     fn render(&mut self) {
@@ -540,5 +533,71 @@ impl ApplicationHandler for CropPickerApp {
             }
             _ => {}
         }
+    }
+}
+
+/// Pure coordinate translation used by the region picker. Extracted so it can
+/// be unit-tested without spinning up an event loop.
+fn compute_region(
+    a_phys: (f64, f64),
+    b_phys: (f64, f64),
+    scale_factor: f64,
+    monitor_origin: (i32, i32),
+) -> Option<Region> {
+    let ax = a_phys.0 / scale_factor;
+    let ay = a_phys.1 / scale_factor;
+    let bx = b_phys.0 / scale_factor;
+    let by = b_phys.1 / scale_factor;
+    let x = ax.min(bx).round() as i32 + monitor_origin.0;
+    let y = ay.min(by).round() as i32 + monitor_origin.1;
+    let w = (ax - bx).abs().round() as u32;
+    let h = (ay - by).abs().round() as u32;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(Region { x, y, w, h })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_at_origin_no_scale() {
+        let r = compute_region((0.0, 0.0), (100.0, 50.0), 1.0, (0, 0)).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 100, 50));
+    }
+
+    #[test]
+    fn drag_normalises_corner_order() {
+        // Drag from bottom-right to top-left must still produce a positive rect.
+        let r = compute_region((100.0, 50.0), (0.0, 0.0), 1.0, (0, 0)).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 100, 50));
+    }
+
+    #[test]
+    fn retina_scale_halves_logical_size() {
+        // 400x400 physical pixels at 2x scale = 200x200 logical points.
+        let r = compute_region((0.0, 0.0), (400.0, 400.0), 2.0, (0, 0)).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 200, 200));
+    }
+
+    #[test]
+    fn monitor_origin_offsets_absolute_coords() {
+        // Picker on a secondary monitor at (-1920, 0) returns absolute coords.
+        let r = compute_region((0.0, 0.0), (100.0, 100.0), 1.0, (-1920, 0)).unwrap();
+        assert_eq!((r.x, r.y), (-1920, 0));
+        assert_eq!((r.w, r.h), (100, 100));
+    }
+
+    #[test]
+    fn zero_area_drag_returns_none() {
+        // Single click without movement: zero area → no selection.
+        assert!(compute_region((50.0, 50.0), (50.0, 50.0), 1.0, (0, 0)).is_none());
+    }
+
+    #[test]
+    fn zero_width_with_height_returns_none() {
+        assert!(compute_region((50.0, 0.0), (50.0, 100.0), 1.0, (0, 0)).is_none());
     }
 }

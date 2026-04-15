@@ -40,6 +40,12 @@ OPTIONS
                      one of --window, --window-title, or --window-id. Mutually
                      exclusive with --region. The output PNGs contain only the
                      cropped sub-image.
+  --redact-faces     Run every saved frame through Apple Vision's face
+                     detector and blur the detected rectangles before the
+                     PNG is written. macOS only. No-op if no faces are
+                     detected. The first leg of 🎯T10's redaction pipeline;
+                     PII text redaction (T10.2) and egress-gating (T10.3)
+                     are not yet implemented.
   --interval SECS    Seconds between captures. Floating-point. Default: 2.
   --threshold N      Minimum pHash Hamming distance from the last saved
                      frame required to save a new frame. Default: 10.
@@ -75,9 +81,10 @@ LOOP BEHAVIOUR
   resizes the cropped region covers the same proportional sub-area.
 
 PLATFORM STATUS
-  macOS arm64   🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T2, 🎯T3, 🎯T4 complete
+  macOS arm64   🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T2, 🎯T3, 🎯T4, 🎯T5,
+                🎯T10.1 complete
                 (region capture, dedup loop, region picker, window capture,
-                 window-relative crop)
+                 window-relative crop, feeder binary, face-blur redactor)
   Windows       planned (🎯T6)
   Linux X11     planned best-effort (🎯T7)
 
