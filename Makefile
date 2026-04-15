@@ -1,6 +1,6 @@
 .PHONY: bullseye build test fmt clippy
 
-bullseye: fmt clippy build
+bullseye: fmt clippy build test
 	@echo "✓ bullseye invariants green"
 
 build:

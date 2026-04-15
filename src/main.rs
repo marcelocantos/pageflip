@@ -2,16 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod capture;
+mod dedup;
 
+use std::io::{self, Write};
 use std::num::ParseIntError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use clap::Parser;
 use time::OffsetDateTime;
 
-use capture::{default_backend, Region};
+use capture::{default_backend, Capture, Region};
+use dedup::Dedup;
 
 const HELP_AGENT: &str = include_str!("help_agent.txt");
 
@@ -118,6 +123,14 @@ fn run(cli: &Cli) -> Result<(), String> {
         })?
         .into();
 
+    if !cli.interval.is_finite() || cli.interval <= 0.0 {
+        return Err(format!(
+            "--interval must be a positive number of seconds, got {}",
+            cli.interval
+        ));
+    }
+    let interval = Duration::from_secs_f64(cli.interval);
+
     let output_dir = cli
         .output
         .clone()
@@ -126,18 +139,78 @@ fn run(cli: &Cli) -> Result<(), String> {
         .map_err(|e| format!("could not create output directory {output_dir:?}: {e}"))?;
 
     let backend = default_backend().map_err(|e| e.to_string())?;
-    let frame = backend.capture(region).map_err(|e| e.to_string())?;
+    let mut dedup = Dedup::new(cli.threshold);
 
+    let stop = install_signal_handler()?;
+
+    eprintln!(
+        "pageflip: capturing region {:?} every {:.3}s (threshold {} bits); Ctrl-C to stop",
+        region, cli.interval, cli.threshold
+    );
+
+    loop {
+        let tick_start = std::time::Instant::now();
+
+        capture_once(backend.as_ref(), region, &mut dedup, &output_dir)?;
+
+        // Wait the remainder of the tick, waking early on Ctrl-C. If capture
+        // took longer than `interval`, skip the sleep and capture immediately.
+        let remaining = interval.saturating_sub(tick_start.elapsed());
+        if remaining.is_zero() {
+            if matches!(
+                stop.try_recv(),
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected)
+            ) {
+                break;
+            }
+            continue;
+        }
+        match stop.recv_timeout(remaining) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => continue,
+        }
+    }
+
+    eprintln!("pageflip: stopped.");
+    Ok(())
+}
+
+fn capture_once(
+    backend: &dyn Capture,
+    region: Region,
+    dedup: &mut Dedup,
+    output_dir: &Path,
+) -> Result<(), String> {
+    let frame = backend.capture(region).map_err(|e| e.to_string())?;
+    if !dedup.should_save(&frame) {
+        return Ok(());
+    }
     let filename = format!("{}.png", timestamp_slug());
     let path = output_dir.join(filename);
     frame.save_png(&path).map_err(|e| e.to_string())?;
 
-    // stdout contract: one absolute path per saved PNG, one per line.
     let absolute = path
         .canonicalize()
         .unwrap_or_else(|_| output_dir.join(path.file_name().unwrap()));
-    println!("{}", absolute.display());
+    // The downstream feeder (🎯T5) relies on one line per saved PNG on stdout.
+    // Flush explicitly so consumers don't buffer a slide.
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", absolute.display())
+        .and_then(|_| stdout.flush())
+        .map_err(|e| format!("stdout write failed: {e}"))?;
     Ok(())
+}
+
+/// Installs a Ctrl-C handler that sends one message on the returned receiver
+/// when the user interrupts the process. Subsequent signals are ignored so a
+/// second Ctrl-C does not abort mid-save.
+fn install_signal_handler() -> Result<mpsc::Receiver<()>, String> {
+    let (tx, rx) = mpsc::channel();
+    ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })
+    .map_err(|e| format!("failed to install signal handler: {e}"))?;
+    Ok(rx)
 }
 
 fn default_output_dir_name() -> String {

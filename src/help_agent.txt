@@ -44,8 +44,16 @@ OUTPUT CONTRACT
       <absolute-path>\n
   Downstream consumers (e.g. the T5 feeder) tail this stream.
 
+LOOP BEHAVIOUR
+  pageflip runs an interval loop: capture, hash with pHash (8x8 DCT +
+  mean), compare to the last saved frame's hash, and save only when the
+  Hamming distance ≥ --threshold. The first frame always saves. Tick
+  cadence targets --interval; if a capture overruns, the next tick fires
+  immediately. Ctrl-C (SIGINT) breaks the loop after the in-flight
+  capture completes and exits 0.
+
 PLATFORM STATUS
-  macOS arm64   primary target (🎯T1.2 complete; 🎯T1.3 in progress)
+  macOS arm64   primary target (🎯T1.1, 🎯T1.2, 🎯T1.3 complete)
   Windows       planned (🎯T6)
   Linux X11     planned best-effort (🎯T7)
 

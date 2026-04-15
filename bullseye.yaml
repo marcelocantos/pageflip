@@ -51,10 +51,11 @@ targets:
     achieved: 2026-04-15
   T1.3:
     name: pageflip runs an interval capture loop with pHash dedup and writes only-changed PNGs
-    status: identified
+    status: achieved
     value: 13.0
     cost: 3.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - '`pageflip --region X,Y,W,H --interval 2 --threshold 10 --output <dir>` captures on each tick and writes a PNG only when the perceptual-hash Hamming distance from the last saved frame exceeds the threshold'
     - The capture-and-hash loop is defined in terms of the platform-abstract trait established in T1.2, so new backends plug in without touching the loop
@@ -65,6 +66,7 @@ targets:
     - T1.2
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-15
   T10:
     name: Local-first redaction pipeline strips PII from every frame before any SaaS egress
     status: identified
