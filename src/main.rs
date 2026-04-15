@@ -1,6 +1,7 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
+mod audio;
 mod capture;
 mod dedup;
 mod picker;
@@ -17,6 +18,7 @@ use std::time::Duration;
 use clap::Parser;
 use time::OffsetDateTime;
 
+use audio::{AudioCaptureHandle, NullTranscriber, Transcriber};
 use capture::{default_backend, Capture, CropSpec, Region, WindowSpec};
 use dedup::Dedup;
 use redact::{FaceBlurRedactor, RedactPipeline, Redactor};
@@ -89,6 +91,18 @@ struct Cli {
     /// Blur detected faces in every saved frame using Apple Vision (macOS).
     #[arg(long)]
     redact_faces: bool,
+
+    /// Capture system audio alongside frames and feed it through a local
+    /// Transcriber. Raw audio never leaves the audio module — only derived
+    /// transcript segments are surfaced. Current default transcriber is
+    /// `null` (discards samples); Whisper/WhisperX lands in T9.2.
+    #[arg(long)]
+    audio: bool,
+
+    /// Transcriber to use when --audio is set. Options: `null`.
+    /// WhisperX support arrives with 🎯T9.2.
+    #[arg(long, value_name = "KIND", default_value = "null")]
+    transcriber: String,
 
     /// Print agent-oriented help (machine-readable invocation notes) and exit.
     #[arg(long, exclusive = true)]
@@ -189,6 +203,12 @@ fn run(cli: &Cli) -> Result<(), String> {
     let mut dedup = Dedup::new(cli.threshold);
     let redact = build_redact_pipeline(cli);
 
+    let audio_handle = if cli.audio {
+        Some(start_audio_capture(&cli.transcriber)?)
+    } else {
+        None
+    };
+
     let stop = install_signal_handler()?;
 
     match &target {
@@ -228,8 +248,37 @@ fn run(cli: &Cli) -> Result<(), String> {
         }
     }
 
+    if let Some(handle) = audio_handle {
+        match handle.stop() {
+            Ok(trailing) => {
+                if !trailing.is_empty() {
+                    eprintln!(
+                        "pageflip: audio finalised with {} trailing segments.",
+                        trailing.len()
+                    );
+                }
+            }
+            Err(e) => eprintln!("pageflip: audio stop returned error: {e}"),
+        }
+    }
+
     eprintln!("pageflip: stopped.");
     Ok(())
+}
+
+fn start_audio_capture(kind: &str) -> Result<AudioCaptureHandle, String> {
+    let transcriber: Box<dyn Transcriber> = match kind {
+        "null" => Box::new(NullTranscriber::default()),
+        other => {
+            return Err(format!(
+                "--transcriber {other:?} is not supported yet (only `null`); \
+                 WhisperX lands with 🎯T9.2"
+            ));
+        }
+    };
+    let handle = audio::start_capture(transcriber).map_err(|e| e.to_string())?;
+    eprintln!("pageflip: audio capture running (transcriber={kind}); raw audio stays in-process");
+    Ok(handle)
 }
 
 fn resolve_target(cli: &Cli, backend: &dyn Capture) -> Result<Option<Target>, String> {

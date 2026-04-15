@@ -24,6 +24,7 @@ clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3"
 image_hasher = "3"
 notify = "7.0.0"
+screencapturekit = "1"
 softbuffer = "0.4"
 time = { version = "0.3", features = ["formatting", "macros"] }
 winit = "0.30"

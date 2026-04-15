@@ -454,10 +454,11 @@ targets:
     achieved: 2026-04-15
   T9.1:
     name: Live audio is captured and piped to an in-process Transcriber — no audio ever written to disk or network
-    status: identified
+    status: achieved
     value: 8.0
     cost: 3.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - System audio is captured via macOS ScreenCaptureKit's audio stream
     - Captured buffers are delivered to a `Transcriber` trait living inside `src/audio/`; the raw-audio type is crate-private and does not implement Serialize, file-write, or any network trait
@@ -470,6 +471,7 @@ targets:
     - T1.3
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T9.2:
     name: WhisperX transcribes buffered audio locally via Whisper large-v3 into transcript.jsonl
     status: identified

@@ -13,4 +13,4 @@ clippy:
 	@cargo clippy --quiet --release -- -D warnings
 
 test:
-	@cargo test --quiet
+	@cargo test --release --quiet
