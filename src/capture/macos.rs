@@ -1,9 +1,9 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
-use xcap::Monitor;
+use xcap::{Monitor, Window};
 
-use super::{Capture, CaptureError, Frame, Region};
+use super::{Capture, CaptureError, Frame, Region, WindowInfo, WindowSpec};
 
 pub struct MacOsCapture {
     monitors: Vec<Monitor>,
@@ -48,6 +48,101 @@ impl Capture for MacOsCapture {
             rgba: image.into_raw(),
         })
     }
+
+    fn list_windows(&self) -> Result<Vec<WindowInfo>, CaptureError> {
+        let windows = Window::all().map_err(|e| classify_xcap_error(e, "Window::all"))?;
+
+        // xcap already excludes minimized windows (CGWindowListOption::OptionOnScreenOnly).
+        // Additionally skip windows with no title — these are system UI surfaces (menu bar
+        // extras, dock overlays, etc.) that aren't useful to the user.
+        let infos = windows
+            .into_iter()
+            .filter_map(|w| {
+                let id = w.id().ok()?;
+                let title = w.title().ok()?;
+                let app_name = w.app_name().ok()?;
+                if title.is_empty() {
+                    return None;
+                }
+                Some(WindowInfo {
+                    id,
+                    title,
+                    app_name,
+                })
+            })
+            .collect();
+
+        Ok(infos)
+    }
+
+    fn capture_window(&self, spec: &WindowSpec) -> Result<Frame, CaptureError> {
+        let window = find_window_for_spec(spec)?;
+        let image = window
+            .capture_image()
+            .map_err(|e| classify_xcap_error(e, "Window::capture_image"))?;
+        Ok(Frame {
+            width: image.width(),
+            height: image.height(),
+            rgba: image.into_raw(),
+        })
+    }
+}
+
+#[allow(dead_code)]
+fn find_window_for_spec(spec: &WindowSpec) -> Result<Window, CaptureError> {
+    let windows = Window::all().map_err(|e| classify_xcap_error(e, "Window::all"))?;
+
+    match spec {
+        WindowSpec::Id(target_id) => windows
+            .into_iter()
+            .find(|w| w.id().ok() == Some(*target_id))
+            .ok_or_else(|| CaptureError::WindowNotFound(format!("id={target_id}"))),
+
+        WindowSpec::TitleExact(target) => {
+            let matches: Vec<Window> = windows
+                .into_iter()
+                .filter(|w| w.title().ok().as_deref() == Some(target.as_str()))
+                .collect();
+            match matches.len() {
+                0 => Err(CaptureError::WindowNotFound(format!("title={target:?}"))),
+                1 => Ok(matches.into_iter().next().unwrap()),
+                _ => Err(CaptureError::AmbiguousWindow(windows_to_infos(matches))),
+            }
+        }
+
+        WindowSpec::TitleContains(needle) => {
+            let matches: Vec<Window> = windows
+                .into_iter()
+                .filter(|w| {
+                    w.title()
+                        .ok()
+                        .map(|t| t.contains(needle.as_str()))
+                        .unwrap_or(false)
+                })
+                .collect();
+            match matches.len() {
+                0 => Err(CaptureError::WindowNotFound(format!(
+                    "title contains {needle:?}"
+                ))),
+                1 => Ok(matches.into_iter().next().unwrap()),
+                _ => Err(CaptureError::AmbiguousWindow(windows_to_infos(matches))),
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn windows_to_infos(windows: Vec<Window>) -> Vec<super::WindowInfo> {
+    windows
+        .into_iter()
+        .filter_map(|w| {
+            Some(super::WindowInfo {
+                id: w.id().ok()?,
+                title: w.title().ok()?,
+                app_name: w.app_name().ok()?,
+            })
+        })
+        .collect()
 }
 
 fn find_monitor_for_region(monitors: &[Monitor], region: Region) -> Result<&Monitor, CaptureError> {
