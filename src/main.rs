@@ -102,10 +102,14 @@ struct Cli {
     #[arg(long)]
     audio: bool,
 
-    /// Transcriber to use when --audio is set. Options: `null`.
-    /// WhisperX support arrives with 🎯T9.2.
+    /// Transcriber to use when --audio is set. Options: `null`, `whisperx`.
     #[arg(long, value_name = "KIND", default_value = "null")]
     transcriber: String,
+
+    /// When --transcriber whisperx is set, override the Whisper model name
+    /// passed to the Python subprocess. Defaults to `large-v3`.
+    #[arg(long, value_name = "MODEL")]
+    whisperx_model: Option<String>,
 
     /// Emit one structured JSON object per saved slide (NDJSON).
     /// SPEC can be `stdout`, `fd:<N>`, or a file path.
@@ -220,7 +224,11 @@ fn run(cli: &Cli) -> Result<(), String> {
         .transpose()?;
 
     let audio_handle = if cli.audio {
-        Some(start_audio_capture(&cli.transcriber)?)
+        Some(start_audio_capture(
+            &cli.transcriber,
+            &output_dir,
+            cli.whisperx_model.clone(),
+        )?)
     } else {
         None
     };
@@ -289,13 +297,18 @@ fn run(cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
-fn start_audio_capture(kind: &str) -> Result<AudioCaptureHandle, String> {
+fn start_audio_capture(
+    kind: &str,
+    output_dir: &Path,
+    whisperx_model: Option<String>,
+) -> Result<AudioCaptureHandle, String> {
     let transcriber: Box<dyn Transcriber> = match kind {
         "null" => Box::new(NullTranscriber::default()),
+        "whisperx" => audio::whisperx_transcriber(output_dir.to_path_buf(), whisperx_model)
+            .map_err(|e| e.to_string())?,
         other => {
             return Err(format!(
-                "--transcriber {other:?} is not supported yet (only `null`); \
-                 WhisperX lands with 🎯T9.2"
+                "--transcriber {other:?} not supported; options: `null`, `whisperx`"
             ));
         }
     };

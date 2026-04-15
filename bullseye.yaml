@@ -261,10 +261,11 @@ targets:
     discovered: 2026-04-14
   T18:
     name: pageflip emits a structured slide-event NDJSON stream that downstream tools consume
-    status: identified
+    status: achieved
     value: 8.0
     cost: 3.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - '`pageflip --events-out <fd|path>` emits one JSON object per newline whenever a slide is saved: `{slide_id, path, t_start_ms, t_end_ms, ocr?, transcript_window?, frontmost_app?}`'
     - Missing fields are omitted gracefully so the schema degrades cleanly as later capabilities land (OCR from T10.2, transcript_window from T9.2, frontmost_app from T10.3)
@@ -276,12 +277,14 @@ targets:
     - T1.3
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T19.1:
     name: meetcat binary reads the pageflip slide-event stream and prints structured events
-    status: identified
+    status: achieved
     value: 5.0
     cost: 2.0
     observable: true
+    actual_cost: 1.0
     acceptance:
     - A Go binary `meetcat` exists in a new crate/module (initially a standalone package, likely under a new repo or `cmd/meetcat/` sibling to claudia)
     - '`pageflip --events-out fd:3 | meetcat` reads the slide-event stream from stdin and prints a short summary per event to stderr for manual verification'
@@ -293,6 +296,7 @@ targets:
     - T18
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T19.2:
     name: meetcat spawns persistent claudia.Agent sessions and streams slide events into them
     status: identified
@@ -474,10 +478,11 @@ targets:
     achieved: 2026-04-15
   T9.2:
     name: WhisperX transcribes buffered audio locally via Whisper large-v3 into transcript.jsonl
-    status: identified
+    status: achieved
     value: 8.0
     cost: 3.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - Transcription uses WhisperX (Python) invoked as a subprocess by pageflip, running Whisper large-v3 weights locally via faster-whisper / CTranslate2 with Metal acceleration on M-series
     - The audio captured under T9.1 is handed to WhisperX as a bounded in-memory buffer (or a FIFO pipe) — never written to disk as a file the filesystem retains after transcription completes
@@ -490,6 +495,7 @@ targets:
     - T9.1
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-15
   T9.3:
     name: pyannote diarisation inside WhisperX adds speaker IDs; slide alignment joins transcript rows to PNG timestamps
     status: identified
