@@ -11,5 +11,8 @@ Cargo.lock.bak
 # Claude Code agent worktrees
 .claude/
 
+# meetcat build artifact
+/meetcat/meetcat
+
 # pageflip output
 pageflip-*/
