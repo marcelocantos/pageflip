@@ -324,42 +324,6 @@ targets:
     origin: manual
     discovered: 2026-04-14
     achieved: 2026-04-15
-  T6:
-    name: Windows backend reaches feature parity (region, window, background window, crop)
-    status: identified
-    value: 5.0
-    cost: 8.0
-    acceptance:
-    - All capture modes (region, window, cropped window) work on Windows 11
-    - Background and minimised windows continue to produce updated captures
-    - Release binary builds in CI for x86_64-pc-windows-msvc and aarch64-pc-windows-msvc
-    - Interactive region picker overlay renders correctly on Windows at 100% and 200% DPI
-    context: Corporate environments run Windows as often as macOS. Windows.Graphics.Capture (Win10 1809+) via the windows-capture crate covers region and window capture, including minimised/occluded windows via the DWM compositor surface. PrintWindow(PW_RENDERFULLCONTENT) is the fallback path. winit handles the overlay. `cargo build --target x86_64-pc-windows-msvc` from mac via cross-compilation, or run CI on Windows.
-    depends_on:
-    - T1
-    - T2
-    - T3
-    - T4
-    origin: manual
-    discovered: 2026-04-14
-  T7:
-    name: Linux backend works under X11; Wayland supported on best-effort basis
-    status: identified
-    value: 2.0
-    cost: 8.0
-    acceptance:
-    - Region and window capture work on X11 with a compositor running
-    - Background-window capture works on X11 via XComposite
-    - 'Wayland: runs on KDE and GNOME to the extent their portal implementations allow; limitations are documented rather than worked around'
-    - Release binary builds in CI for x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu
-    context: 'Lowest-priority platform (user has no current Linux use case) but the cross-platform capability is what justified Rust over Swift. X11 path uses XCompositeNameWindowPixmap for background windows (requires a running compositor, which is near-universal). Wayland is intentionally best-effort: xdg-desktop-portal''s ScreenCast for window pick works on KDE/GNOME but background-window capture is compositor-dependent and may simply not be achievable on some setups. Acceptance reflects this asymmetry.'
-    depends_on:
-    - T1
-    - T2
-    - T3
-    - T4
-    origin: manual
-    discovered: 2026-04-14
   T8:
     name: pageflip is installable via Homebrew tap and ships release binaries on tag
     status: identified
