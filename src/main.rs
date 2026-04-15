@@ -4,9 +4,11 @@
 mod audio;
 mod capture;
 mod dedup;
+mod doctor;
 mod events;
 mod picker;
 mod redact;
+mod session_log;
 
 use std::io::{self, Write};
 use std::num::ParseIntError;
@@ -16,10 +18,11 @@ use std::str::FromStr;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use time::OffsetDateTime;
 
 use events::{EventSink, SlideEvent};
+use session_log::{LogEvent, SessionLog};
 
 use audio::{AudioCaptureHandle, NullTranscriber, Transcriber};
 use capture::{default_backend, Capture, CropSpec, Region, WindowSpec};
@@ -34,6 +37,17 @@ enum Target {
 }
 
 const HELP_AGENT: &str = include_str!("help_agent.txt");
+
+/// Subcommands. When absent the default capture loop runs.
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Print a markdown diagnostics report for bug reports.
+    Doctor {
+        /// Tail the last 200 lines of this session log into the report.
+        #[arg(long, value_name = "PATH")]
+        log: Option<PathBuf>,
+    },
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -51,6 +65,9 @@ const HELP_AGENT: &str = include_str!("help_agent.txt");
         .multiple(false),
 ))]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Cmd>,
+
     /// Region to capture as X,Y,W,H (logical-point screen coordinates).
     #[arg(long, value_name = "X,Y,W,H")]
     region: Option<RegionArg>,
@@ -118,6 +135,11 @@ struct Cli {
     #[arg(long, value_name = "SPEC")]
     events_out: Option<String>,
 
+    /// Write a structured NDJSON session log to this path for bug reports.
+    /// Use `pageflip doctor --log <PATH>` to include it in a doctor report.
+    #[arg(long, value_name = "PATH")]
+    log_file: Option<PathBuf>,
+
     /// Print agent-oriented help (machine-readable invocation notes) and exit.
     #[arg(long, exclusive = true)]
     help_agent: bool,
@@ -177,6 +199,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if let Some(Cmd::Doctor { log }) = &cli.command {
+        doctor::run(log.as_deref());
+        return ExitCode::SUCCESS;
+    }
+
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
@@ -223,6 +250,22 @@ fn run(cli: &Cli) -> Result<(), String> {
         .map(events::parse_events_out)
         .transpose()?;
 
+    // Open session log if requested.
+    let mut slog: Option<SessionLog> = cli
+        .log_file
+        .as_deref()
+        .map(|p| SessionLog::open(p).map_err(|e| format!("--log-file {p:?}: {e}")))
+        .transpose()?;
+
+    if let Some(ref mut sl) = slog {
+        sl.log(LogEvent::SessionStart {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            git_sha: env!("PAGEFLIP_GIT_SHA").to_string(),
+            pid: std::process::id(),
+            t_ms: unix_ms(),
+        });
+    }
+
     let audio_handle = if cli.audio {
         Some(start_audio_capture(
             &cli.transcriber,
@@ -251,17 +294,26 @@ fn run(cli: &Cli) -> Result<(), String> {
         ),
     };
 
+    let mut slides_saved: u32 = 0;
+    let mut slides_deduped: u32 = 0;
+
     loop {
         let tick_start = std::time::Instant::now();
 
-        capture_once(
+        match capture_once(
             backend.as_ref(),
             &target,
             &mut dedup,
             &redact,
             &output_dir,
             sink.as_mut(),
-        )?;
+            slog.as_mut(),
+            cli.threshold,
+        ) {
+            Ok(SaveResult::Saved) => slides_saved += 1,
+            Ok(SaveResult::Deduped) => slides_deduped += 1,
+            Err(e) => return Err(e),
+        }
 
         let remaining = interval.saturating_sub(tick_start.elapsed());
         if remaining.is_zero() {
@@ -277,6 +329,14 @@ fn run(cli: &Cli) -> Result<(), String> {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => continue,
         }
+    }
+
+    if let Some(ref mut sl) = slog {
+        sl.log(LogEvent::SessionStop {
+            t_ms: unix_ms(),
+            slides_saved,
+            slides_deduped,
+        });
     }
 
     if let Some(handle) = audio_handle {
@@ -295,6 +355,11 @@ fn run(cli: &Cli) -> Result<(), String> {
 
     eprintln!("pageflip: stopped.");
     Ok(())
+}
+
+enum SaveResult {
+    Saved,
+    Deduped,
 }
 
 fn start_audio_capture(
@@ -403,7 +468,9 @@ fn capture_once(
     redact: &Option<RedactPipeline>,
     output_dir: &Path,
     sink: Option<&mut EventSink>,
-) -> Result<(), String> {
+    slog: Option<&mut SessionLog>,
+    threshold: u32,
+) -> Result<SaveResult, String> {
     let t_start_ms = unix_ms();
 
     let frame = match target {
@@ -412,9 +479,20 @@ fn capture_once(
         Target::WindowCropped(spec, crop) => backend.capture_window_cropped(spec, crop),
     }
     .map_err(|e| e.to_string())?;
+
     if !dedup.should_save(&frame) {
-        return Ok(());
+        if let Some(sl) = slog {
+            // We don't have the dist here without peeking inside Dedup, so
+            // log threshold=threshold with dist=0 as a conservative stand-in.
+            sl.log(LogEvent::SlideDeduped {
+                t_ms: t_start_ms,
+                dist: 0,
+                threshold,
+            });
+        }
+        return Ok(SaveResult::Deduped);
     }
+
     let frame = match redact {
         Some(pipeline) => pipeline.apply(frame).map_err(|e| e.to_string())?,
         None => frame,
@@ -429,6 +507,18 @@ fn capture_once(
     let absolute = path
         .canonicalize()
         .unwrap_or_else(|_| output_dir.join(path.file_name().unwrap()));
+
+    // Session log: record the save with a path hash (never the raw path).
+    if let Some(sl) = slog {
+        let bytes = std::fs::metadata(&absolute).map(|m| m.len()).unwrap_or(0);
+        let phash = session_log::path_hash(&absolute, &sl.salt.clone());
+        sl.log(LogEvent::SlideSaved {
+            t_ms: t_end_ms,
+            slide_id: slug.clone(),
+            bytes,
+            path_hash: phash,
+        });
+    }
 
     if let Some(sink) = sink {
         // --events-out mode: emit structured NDJSON. Downstream can derive
@@ -452,7 +542,7 @@ fn capture_once(
             .and_then(|_| stdout.flush())
             .map_err(|e| format!("stdout write failed: {e}"))?;
     }
-    Ok(())
+    Ok(SaveResult::Saved)
 }
 
 /// Returns milliseconds since the Unix epoch.
