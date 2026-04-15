@@ -8,5 +8,8 @@ Cargo.lock.bak
 .idea/
 .DS_Store
 
+# Claude Code agent worktrees
+.claude/
+
 # pageflip output
 pageflip-*/

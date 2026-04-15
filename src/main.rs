@@ -3,6 +3,7 @@
 
 mod capture;
 mod dedup;
+mod picker;
 
 use std::io::{self, Write};
 use std::num::ParseIntError;
@@ -116,12 +117,16 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
-    let region: Region = cli
-        .region
-        .ok_or_else(|| {
-            "--region X,Y,W,H is required (interactive picker lands with 🎯T2)".to_string()
-        })?
-        .into();
+    let region: Region = match cli.region {
+        Some(r) => r.into(),
+        None => match picker::pick_region().map_err(|e| e.to_string())? {
+            Some(r) => r,
+            None => {
+                eprintln!("pageflip: picker cancelled.");
+                return Ok(());
+            }
+        },
+    };
 
     if !cli.interval.is_finite() || cli.interval <= 0.0 {
         return Err(format!(

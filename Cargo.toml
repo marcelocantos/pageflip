@@ -17,7 +17,9 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3"
 image_hasher = "3"
+softbuffer = "0.4"
 time = { version = "0.3", features = ["formatting", "macros"] }
+winit = "0.30"
 xcap = "0.9"
 
 [profile.release]
