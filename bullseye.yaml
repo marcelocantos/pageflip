@@ -138,100 +138,107 @@ targets:
     origin: manual
     discovered: 2026-04-15
   T11:
-    name: Reference resolver is a pluggable pipeline with MCP auto-discovery and document-name capture
+    name: meetcat's resolver runs as a stateless Task-mode agent turning extracted strings into hyperlinked refs
     status: identified
     value: 8.0
     cost: 8.0
     acceptance:
-    - Resolver stages are registerable via config; adding a new reference type does not require changes to the capture loop
-    - Built-in stages cover URLs, Jira keys, Confluence page titles, GitHub PR/issue references, Slack permalinks
-    - PowerPoint / Keynote / Google Slides window-title document names are captured per frame and threaded through the resolver
-    - Unrecognised patterns with repeated occurrence are surfaced as "candidate MCP resolver needed" suggestions, with sample strings
-    - Resolved references become a stable structured stream consumable by downstream targets (T5, T13, T14, T16)
-    context: 'Generalises the URL-extraction idea into an extensible resolver stack. Each captured string (from OCR or transcript) passes through stages: regex patterns → embedding similarity against known reference shapes → LLM classification → MCP server call. Built-in resolvers for URLs, Jira tickets, Confluence page titles, GitHub PRs/issues, Slack permalinks. Non-slide text references are captured too — the PowerPoint window-title "Deck.pptx - PowerPoint" gives the source document name; Teams chat-pane OCR gives in-meeting links; Keynote/Google-Slides title bars give deck provenance. Unknown patterns surface as candidate new resolvers ("I saw 47 strings matching FOO-\\d+ that no resolver recognised — is there an MCP server for this?"). Output feeds every downstream consumer: the context fetcher, contradiction detector, cognitive-augmentation sidebar, dejargoniser.'
+    - Resolver stages are registerable via config; adding a new reference type (Jira project, Confluence space, internal tool) does not require changes to meetcat's core event loop
+    - Built-in stages cover URLs, Jira keys, Confluence page titles, GitHub PR/issue refs, Slack permalinks
+    - Runs inside meetcat as a claudia.Task (one-shot per batch of new strings) because the lookup is stateless and cheap; results cache per-meeting so repeated refs do not re-query
+    - PowerPoint / Keynote / Google Slides window-title document names are captured per slide event (from the `frontmost_app` field of T18) and threaded through the resolver
+    - Unrecognised patterns that repeat are flagged as "candidate MCP resolver needed" in the glossary pane, with sample strings
+    - Resolved refs become a stable structured stream consumable by other meetcat specialists (skeptic, constructive, neutral, contradictions, dejargoniser) and rendered as OSC 8 hyperlinks per T19.4
+    context: Moves T11 into meetcat's architecture explicitly. The resolver is a natural Task-mode fit because lookups are stateless and per-string — one claudia.Task per batch of new refs found in a slide event. Result shapes ({kind, raw, title, url}) feed into T19.4's hyperlink rendering. Cross-meeting resolver state (which MCPs exist, which docs appear often) lives in mnemo, not in claudia session memory.
     depends_on:
-    - T1.3
+    - T19.2
     - T9.2
     origin: manual
     discovered: 2026-04-14
   T12:
-    name: Each meeting produces a structured artifact written to a configurable docs/ path
+    name: meetcat's neutral session writes a structured meeting artifact folder at meeting stop
     status: identified
     value: 8.0
     cost: 5.0
     observable: true
     acceptance:
-    - Each capture session produces a single folder containing slides/*.png, transcript.md, decisions.md, actions.md, references.json, contradictions.md, open-questions.md
-    - Destination path is configurable (CLI flag + config file); default points at a user-designated docs/ folder
-    - transcript.md rows are speaker-attributed and timestamp-aligned to slide boundaries
-    - decisions.md and actions.md are extracted automatically by an LLM pass over the transcript + slide text
-    - Re-running on the same meeting ID does not destroy the prior artifact (append / version / refuse-and-warn)
-    context: 'Final output shape: a folder per meeting containing slides/*.png, transcript.md (speaker-attributed, slide-aligned), decisions.md, actions.md (with inferred assignees), references.json (resolved), contradictions.md, open-questions.md. Destination is configurable; the natural default is a designated "meetings" repo''s docs/ subdirectory so mnemo will index it automatically (see companion mnemo target). Rerun safety: re-capturing the same meeting appends or versions rather than destroys. Replaces ad-hoc PNG dumps with a mnemo-indexable, human-readable artifact that''s joinable against code commits, Jira tickets, and prior meetings.'
+    - On meeting-stop, meetcat asks its neutral session agent to emit `decisions.md`, `actions.md`, `open-questions.md`, `contradictions.md`, `references.json` based on the full accumulated session context
+    - The artifact folder also contains `slides/*.png` (symlinked or copied from pageflip's output dir), `transcript.jsonl` (from T9.2/T9.3), and session-id pointers for each specialist so the user can attach later
+    - Destination path is configurable via meetcat config + CLI flag; default points at a user-designated meetings/ folder
+    - transcript.jsonl rows are speaker-attributed (T9.3) and slide-aligned (T9.3)
+    - Re-running on the same meeting ID does not destroy the prior artifact (append, version, or refuse-and-warn per config)
+    - The artifact is mnemo-indexable — meetcat optionally writes a `<meeting>.md` digest into a configured mnemo-indexed directory so future agents can reference this meeting by content search
+    context: 'T12 is now owned by meetcat, not pageflip. The session agent that has been accumulating context all meeting is in the best position to produce the artifact: it has seen every slide in sequence, heard every transcript window, and can distil decisions/actions coherently. Re-uses the existing session context rather than re-analysing from raw artifacts post-hoc.'
     depends_on:
     - T9.3
-    - T11
+    - T19.2
     origin: manual
     discovered: 2026-04-14
   T13:
-    name: Real-time cognitive-augmentation sidebar runs skeptic, constructive, and neutral perspectives in parallel
+    name: meetcat runs skeptic / constructive / neutral specialists as parallel persistent sessions
     status: identified
     value: 8.0
     cost: 5.0
     acceptance:
-    - 'For each new slide, three perspectives are produced: skeptic (challenges), constructive (additions), neutral (links and context)'
-    - Outputs appear in a sidecar view (log file, web pane, or Claude Code session) within ~5 seconds of slide detection
-    - Each perspective is clearly labelled so the user can triage at a glance
-    - Neutral perspective includes paste-able URLs and short quotes, not just summaries
-    - Perspectives can be individually enabled/disabled via flag
-    context: 'Pure devil''s-advocate was the original framing, but the useful stance is "knowledgeable colleague" — skeptical where rigour is missing, constructive where ideas are directionally sound, neutral-informative where neither applies. Three subagents run in parallel per new slide: skeptic (challenge questions, missing assumptions, counter-evidence), constructive (addenda, directional suggestions, "yes-and" extensions), neutral (paste-able links to authoritative sources, relevant prior decisions, adjacent context worth knowing). Output is a sidebar/log the user scans during the meeting — never injected into the meeting itself. Latency budget matters: the suggestions need to arrive before discussion has moved on.'
+    - 'Three claudia.Agent sessions run in parallel across a meeting: `skeptic`, `constructive`, `neutral`'
+    - Each session has a system prompt loaded from config; defaults are checked into the repo as `docs/specialists/{skeptic,constructive,neutral}.md`
+    - Each session receives every slide event (slide OCR + transcript window + frontmost app) as a single message turn
+    - Outputs stream into their own TUI panes (T19.3) within ~5 seconds of slide detection; latency budget is documented
+    - The neutral specialist also embeds paste-able URLs and short quotes (via T11 resolver + T19.4 hyperlink rendering), not just summaries
+    - Each specialist can be individually enabled/disabled via config or CLI flag (`meetcat --specialists skeptic,neutral`)
+    context: 'Explicitly pins the three-perspectives feature to meetcat''s session architecture. The value is cumulative cross-slide context: slide 17''s skepticism knows what was decided on slide 12. Prompt caching makes the growing context tractable per-turn. System prompts are checked in as markdown so they''re tunable without code changes.'
     depends_on:
-    - T11
+    - T19.3
     origin: manual
     discovered: 2026-04-14
   T14:
-    name: Cross-meeting contradiction detector surfaces conflicts in real time via the resolver pipeline
+    name: meetcat's contradictions session flags cross-meeting conflicts via mnemo in real time
     status: identified
     value: 13.0
     cost: 5.0
     acceptance:
-    - Every claim in slide OCR and transcript is embedded and persisted to mnemo alongside its provenance (meeting, slide, timestamp, speaker)
-    - When a new claim's embedding matches a prior claim beyond a threshold but surface forms conflict (numeric, negation, assignee), a contradiction is surfaced
-    - Contradictions appear in the cognitive-augmentation sidebar in real time, not post-hoc
-    - False-positive rate is tunable via threshold; default setting surfaces roughly one contradiction per long meeting block rather than noise
-    - Each contradiction links to the prior meeting artifact and the specific slide or transcript segment that conflicts
-    context: 'The killer corporate feature. Each slide''s OCR and transcript claims are embedded and stored via mnemo (which is already indexing the docs/ artifact stream from T12). When a new claim arrives, a similarity search against prior meetings returns semantically close but numerically or factually divergent statements ("Q3 revenue was $10M" in January vs. "$12M" in April). Contradictions surface in real time through the same sidebar as T13 — they routed through the resolver (T11) so the call-out is part of the standard context-augmentation flow rather than a separate feature. Calibration matters: false-positive rate tunable, default aims for ~1 flagged contradiction per long meeting block so the user trusts the signal.'
+    - A dedicated `contradictions` claudia.Agent session runs alongside the T13 specialists
+    - Each claim in slide OCR and transcript is surfaced to this session along with a mnemo query for semantically similar prior claims (meeting, slide, timestamp, speaker)
+    - When the session judges a prior claim conflicts with a new one (numeric, negation, assignee mismatch), it emits a contradiction alert routed to both its own pane AND the neutral pane as a banner
+    - False-positive rate is tunable via the session's system prompt + a sensitivity config; default aims for ~1 flagged contradiction per long meeting block rather than noise
+    - Each contradiction links (via T19.4 OSC 8) to the prior meeting artifact path and the specific slide or transcript segment that conflicts
+    - mnemo is the persistence boundary — session context alone is not used for cross-meeting claims, so the invariant holds even if the contradictions session is restarted
+    context: Contradictions need cross-meeting memory, which a per-meeting session doesn't have. Mnemo is the durable store; the session queries it for each new claim. Prompts for this specialist emphasise calibration (1 flag per meeting block, not a firehose) so users trust the signal. Links render as OSC 8 hyperlinks so a contradiction is literally one click away from the source.
     depends_on:
     - T11
     - T12
     origin: manual
     discovered: 2026-04-14
   T15:
-    name: Stopping capture autostarts a Claude Code dialog preloaded with the full meeting artifact
+    name: Stopping capture leaves meetcat's neutral session attachable for post-meeting Q&A
     status: identified
     value: 5.0
     cost: 2.0
     acceptance:
-    - Capture-stop triggers `claude` (new session or `--resume <id>`) with a preamble that loads the artifact folder
-    - User is dropped into a conversational prompt and can immediately ask questions about the meeting
-    - Session ID is configurable so related meetings can thread into a single ongoing dialog
-    - If the user exits without engaging, no artifact state is lost
-    context: 'When capture stops, a Claude Code session is launched (or resumed) with the full artifact folder already in context: slides, transcript, references, decisions, actions, contradictions. The user isn''t uploading files after the meeting — they''re continuing a conversation the tool already had. Session ID is optional so the same dialog can span many meetings on a theme ("the project Foo steering group") across days.'
+    - On meeting-stop, meetcat leaves the `neutral` claudia.Agent session alive (tmux-backed) instead of terminating it
+    - The user can attach via `meetcat attach neutral` (or equivalent) and immediately resume the conversation with full artifact context loaded
+    - Session IDs for all specialists are persisted in the artifact folder so the user can attach to any perspective post-hoc, not just neutral
+    - Attaching after a machine reboot resumes the session via `claudia`'s Session-mode tmux substrate
+    - If the user exits without attaching, no artifact state is lost; the sessions can be terminated via `meetcat stop-sessions <meeting-id>`
+    context: 'T15 falls out of T19.2 almost for free: claudia''s Session mode keeps agents alive via tmux regardless of meetcat''s own process lifetime. The user picks up the conversation where it left off with zero state reconstruction. This is notably better than the original T15 idea of "launch a fresh Claude Code session preloaded with the artifact", because the neutral agent already knows the meeting.'
     depends_on:
     - T12
+    - T19.2
     origin: manual
     discovered: 2026-04-14
   T16:
-    name: Dejargoniser expands acronyms from a local Confluence glossary and researches unknown TLAs in real time
+    name: meetcat's dejargoniser session expands acronyms using a local Confluence glossary cache
     status: identified
     value: 5.0
     cost: 5.0
     acceptance:
-    - A one-command scrape builds a local cache of Confluence-defined acronyms and jargon
-    - OCR'd and transcribed acronyms get inline expansion in the cognitive-augmentation sidebar
-    - Unknown acronyms trigger a background research pass (Confluence / GitHub / web) and print candidate expansions inline
-    - Cache refresh is incremental where possible and bounded in cost (no re-scraping the entire wiki each time)
-    - Misrecognised acronyms (OCR errors) don't pollute the cache
-    context: Corporate meetings are acronym-dense. A one-time scrape of the organisation's Confluence glossary pages builds a locally-cached acronym/jargon index (re-scrapable on a schedule). OCR'd or transcribed acronyms get expanded against the cache and surfaced inline in the sidebar. Acronyms with no cache hit (e.g., a new three-letter abbreviation first heard in a meeting) trigger a lightweight background research agent — Confluence search, GitHub search, web search — and print candidate expansions inline so the user isn't silently confused. Runs via the resolver (T11) so "unknown acronym" is just another resolver stage.
+    - A one-command scrape (`meetcat glossary refresh --confluence-url ...`) builds a local cache of Confluence-defined acronyms and jargon
+    - The `dejargoniser` claudia.Agent session (Session mode so it accumulates this meeting's glossary) receives each slide event along with the local cache lookups for acronyms it contains
+    - Inline expansion of known acronyms appears in the glossary pane (T19.3) with the Confluence page linked via OSC 8 (T19.4)
+    - Unknown acronyms trigger a brief claudia.Task background research pass (Confluence + GitHub + web) and emit candidate expansions in the glossary pane
+    - Glossary cache refresh is incremental where possible and bounded in cost — no full re-scrape per meeting
+    - Misrecognised acronyms (OCR errors) don't pollute the cache — cache writes require a confidence threshold or user confirmation
+    context: Pinned to meetcat's architecture. Session mode for the main dejargoniser (it accumulates the meeting's glossary so repeated acronyms are only defined once), Task mode for the unknown-acronym research passes (stateless per-acronym, parallelisable, Haiku-cheap). Feeds into the glossary pane of T19.3 and uses T19.4's OSC 8 rendering for clickable references.
     depends_on:
     - T11
     origin: manual
@@ -252,6 +259,93 @@ targets:
     - T12
     origin: manual
     discovered: 2026-04-14
+  T18:
+    name: pageflip emits a structured slide-event NDJSON stream that downstream tools consume
+    status: identified
+    value: 8.0
+    cost: 3.0
+    observable: true
+    acceptance:
+    - '`pageflip --events-out <fd|path>` emits one JSON object per newline whenever a slide is saved: `{slide_id, path, t_start_ms, t_end_ms, ocr?, transcript_window?, frontmost_app?}`'
+    - Missing fields are omitted gracefully so the schema degrades cleanly as later capabilities land (OCR from T10.2, transcript_window from T9.2, frontmost_app from T10.3)
+    - The stream is line-buffered and flushed per event so tailing consumers see events without waiting for a block
+    - 'Output target is configurable: `stdout`, a file path, or `fd:<N>` for file-descriptor delivery to a child process; backwards-compatible with the existing `stdout = one absolute path per line` contract when `--events-out` is absent'
+    - A JSON schema file (`docs/slide-event-schema.json`) documents the protocol; meetcat and pageflip-feed both validate against it
+    context: 'The producer-side contract that decouples pageflip (the capture engine) from consumers (pageflip-feed, meetcat, any future TUI/GUI). Replaces the ad-hoc "path-per-line on stdout" convention with a structured stream that can carry richer metadata as later capabilities land. Degrades gracefully: when OCR isn''t available yet, the `ocr` field is simply absent. Observable: `pageflip --events-out /tmp/events.jsonl` while capturing, then `jq` the file to see structured entries.'
+    depends_on:
+    - T1.3
+    origin: manual
+    discovered: 2026-04-15
+  T19.1:
+    name: meetcat binary reads the pageflip slide-event stream and prints structured events
+    status: identified
+    value: 5.0
+    cost: 2.0
+    observable: true
+    acceptance:
+    - A Go binary `meetcat` exists in a new crate/module (initially a standalone package, likely under a new repo or `cmd/meetcat/` sibling to claudia)
+    - '`pageflip --events-out fd:3 | meetcat` reads the slide-event stream from stdin and prints a short summary per event to stderr for manual verification'
+    - meetcat validates each event against the JSON schema from T18 and surfaces malformed events with a clear error
+    - Implements --help, --version, --help-agent per the global CLI Binaries convention
+    - Uses claudia's NDJSON-parsing patterns where applicable to stay consistent
+    context: 'First meetcat sub-target: the walking skeleton. No Claude agents yet, no TUI, no panes. Just proves the cross-binary NDJSON protocol works and meetcat can read events as pageflip emits them. Observable checkpoint: run pageflip and meetcat connected by a pipe, see meetcat echo each slide event.'
+    depends_on:
+    - T18
+    origin: manual
+    discovered: 2026-04-15
+  T19.2:
+    name: meetcat spawns persistent claudia.Agent sessions and streams slide events into them
+    status: identified
+    value: 13.0
+    cost: 3.0
+    observable: true
+    acceptance:
+    - 'On meeting start, meetcat uses `claudia.Start` (Session mode, tmux-backed) to spawn one agent per configured specialist: skeptic, constructive, neutral, dejargoniser, contradictions'
+    - Each specialist has its own model choice (haiku/sonnet/opus) and system prompt loaded from a config file
+    - For each slide event, meetcat renders a standardised message (slide path reference, OCR snippet, transcript window) and injects it into every session agent in parallel
+    - Each agent's streaming transcript is routed to stderr (or a per-agent log file) tagged by specialist name, in order of arrival
+    - Prompt caching via Claude Code's `cache_control` is leveraged so growing session context does not scale per-turn cost linearly; meetcat documents the expected cost envelope for a 60-minute meeting
+    - Session IDs are stable per meeting; meetcat records them to a state file so `meetcat attach <specialist>` post-meeting drops the user into that live session (serves T15)
+    - Meeting stop cleanly terminates all sessions with a configurable grace period for final responses
+    context: 'The core value of meetcat: parallel persistent Claude sessions, each accumulating cross-slide context, each a different specialist perspective. Session mode is chosen over Task mode deliberately — the value of e.g. the skeptic is that slide 17''s challenge knows about slide 12''s decision. Resolver-style stateless lookups that don''t need context can still use Task mode (a later enhancement). Observable: run a meeting, watch four streams of specialist commentary arrive in parallel.'
+    depends_on:
+    - T19.1
+    origin: manual
+    discovered: 2026-04-15
+  T19.3:
+    name: meetcat presents a TUI with an auto-sizing pane per specialist agent
+    status: identified
+    value: 8.0
+    cost: 5.0
+    observable: true
+    acceptance:
+    - meetcat renders a bubbletea or tview TUI with one pane per running specialist plus a glossary pane
+    - Panes auto-size based on available terminal width/height and the live content density of each specialist
+    - Each pane shows the specialist name, model, streaming token output for the most recent slide, and a collapsed history of prior turns
+    - A status bar shows slide count, elapsed meeting time, running-total USD cost across all sessions, and the frontmost-app of the most recent slide event
+    - 'Keyboard shortcuts: Tab to cycle focus, / to search within a pane, Enter to expand/collapse history, q to stop the meeting gracefully'
+    - The TUI degrades to a simple scrolling-lines mode when not on a TTY (piped output), so meetcat still works in CI / log-capture contexts
+    context: 'Third meetcat sub-target. Turns the raw specialist streams from T19.2 into a meeting-appropriate UX with focused panes. bubbletea is the idiomatic Go choice; tview is a fallback if bubbletea''s auto-sizing model doesn''t fit. Observable: a meeting session''s visible panes updating in parallel as slides land.'
+    depends_on:
+    - T19.2
+    origin: manual
+    discovered: 2026-04-15
+  T19.4:
+    name: meetcat renders URLs, Jira tickets, and document refs as OSC 8 hyperlinks
+    status: identified
+    value: 5.0
+    cost: 2.0
+    observable: true
+    acceptance:
+    - URLs in specialist output are rewritten in the TUI as OSC 8 terminal hyperlinks (`\x1b]8;;URL\x07TEXT\x1b]8;;\x07`)
+    - Known patterns (Jira keys, Confluence page names, GitHub PR/issue refs, Slack permalinks) are detected by the resolver (T11) and rewritten as hyperlinks to the resolved URL, with the human-readable title as the link text
+    - In non-TTY / non-OSC-8-capable terminals the bytes degrade to plain `[TEXT](URL)` markdown so nothing is lost
+    - A glossary pane accumulates known acronyms (from T16) as hyperlinked entries pointing at their Confluence page or best guess
+    context: 'Turns the resolver/dejargoniser output into clickable affordances. iTerm2, WezTerm, kitty, and modern Claude Code all render OSC 8 hyperlinks. No framework dependency — just the escape bytes. Observable: clicking a Jira ticket number in meetcat opens the browser at the right ticket.'
+    depends_on:
+    - T19.3
+    origin: manual
+    discovered: 2026-04-15
   T2:
     name: Interactive region picker lets the user draw a rectangle on the desktop (macOS)
     status: achieved
