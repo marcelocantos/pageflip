@@ -2244,6 +2244,7 @@ dependencies = [
 name = "pageflip"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "clap",
  "ctrlc",
  "image_hasher",
@@ -2253,6 +2254,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-vision",
  "screencapturekit",
+ "serde",
+ "serde_json",
  "softbuffer",
  "time",
  "winit",

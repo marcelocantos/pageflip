@@ -29,11 +29,13 @@
 #![allow(dead_code)]
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 #[cfg(target_os = "macos")]
 mod capture;
+pub mod whisperx;
 
 /// A transcript segment produced by a Transcriber.
 #[derive(Debug, Clone)]
@@ -208,6 +210,19 @@ pub fn start_capture(_transcriber: Box<dyn Transcriber>) -> Result<AudioCaptureH
     Err(AudioError::BackendUnavailable(format!(
         "no audio capture backend for this platform (target_os = {})",
         std::env::consts::OS
+    )))
+}
+
+/// Build a [`whisperx::WhisperxTranscriber`] boxed as a [`Transcriber`].
+///
+/// `output_dir` is where `transcript.jsonl` will be written after `finalise`.
+/// `model` overrides the default model name (`large-v3`).
+pub fn whisperx_transcriber(
+    output_dir: PathBuf,
+    model: Option<String>,
+) -> Result<Box<dyn Transcriber>, TranscribeError> {
+    Ok(Box::new(whisperx::WhisperxTranscriber::new(
+        output_dir, model,
     )))
 }
 
