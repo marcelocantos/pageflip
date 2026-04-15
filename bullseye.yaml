@@ -69,7 +69,7 @@ targets:
     achieved: 2026-04-15
   T10:
     name: Local-first redaction pipeline strips PII from every frame before any SaaS egress
-    status: identified
+    status: achieved
     value: 13.0
     cost: 5.0
     acceptance:
@@ -83,6 +83,58 @@ targets:
     - T1.3
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-15
+  T10.1:
+    name: Face-blur redactor blurs all detected faces in each captured frame before any downstream consumer
+    status: identified
+    value: 8.0
+    cost: 3.0
+    observable: true
+    acceptance:
+    - A `Redactor` trait with a `FaceBlurRedactor` implementation lives in `src/redact/`
+    - Face detection uses Apple Vision (`objc2-vision`) on macOS; detected rectangles are blurred in the RGBA buffer before the Frame is saved
+    - A `RedactPipeline` composes redactors and is invoked on every saved frame when the redaction gate is on
+    - Default behaviour is unchanged (redaction opt-in) until T10.3 flips it to opt-out for egress
+    - No-face-detected is not an error — the frame passes through unchanged
+    context: 'First sub-target of T10. Corresponds to the face-detection-and-blur leg of the full redaction pipeline. Does not address PII text redaction (T10.2) or egress controls (T10.3). Observable checkpoint: run pageflip on a frame with a visible face (e.g. a video call participant tile), see the saved PNG with the face blurred.'
+    depends_on:
+    - T1.3
+    origin: manual
+    discovered: 2026-04-15
+  T10.2:
+    name: PII text redactor masks emails, phones, card numbers, IDs, and named entities in OCR'd frame text
+    status: identified
+    value: 8.0
+    cost: 5.0
+    observable: true
+    acceptance:
+    - Frames pass through OCR (Apple Vision VNRecognizeTextRequest on macOS) to yield per-word bounding boxes + strings
+    - A regex-based PII detector flags emails, phone numbers, credit-card numbers, and government-ID patterns
+    - A local NER pass flags obvious person/org/location names using a small on-device model (e.g. via rust-bert, or a subprocess to a tiny spaCy model)
+    - Detected regions are masked (black box, blur, or opaque rectangle) in the saved frame
+    - '`RedactPipeline` can chain the text redactor after the face redactor; order is configurable'
+    context: 'Second sub-target of T10. OCR is introduced here because redacting text requires it; other targets (T11 resolver, T14 contradictions, T16 dejargoniser) will reuse the same OCR output stream. Observable: a saved frame with visible PII that is blacked out after redaction. Depends on T10.1 so the RedactPipeline trait and plumbing exist before stacking a second redactor on top.'
+    depends_on:
+    - T10.1
+    origin: manual
+    discovered: 2026-04-15
+  T10.3:
+    name: App allowlist + paranoid mode + architectural egress gate enforce redaction before network egress
+    status: identified
+    value: 8.0
+    cost: 3.0
+    observable: true
+    acceptance:
+    - An app/domain allowlist drops frames whose frontmost application is not permitted to leave the machine
+    - 'Frontmost-app detection uses NSWorkspace on macOS; allowlist loaded from config (default: empty = permit none for egress)'
+    - A `--paranoid` flag retains unredacted originals locally and forwards only redacted artifacts to any egress path
+    - Any network egress path (e.g. future `pageflip-feed --egress saas`) is gated on a loaded RedactPipeline — enforced at the type level, not by convention
+    - A separate `Egress` trait (or equivalent) makes it a compile error to ship a Frame to a remote endpoint without first passing through `RedactPipeline::apply`
+    context: 'Third sub-target of T10. This is the *policy and enforcement* layer on top of the detection layers (T10.1, T10.2). The architectural-boundary requirement (criterion 5 of the original T10) matters most here: we want a type-system-level guarantee that redaction cannot be bypassed on the egress path. Observable: a compile error when attempting to construct an egress call with an un-redacted Frame, plus a runtime rejection when the allowlist denies the frontmost app.'
+    depends_on:
+    - T10.1
+    origin: manual
+    discovered: 2026-04-15
   T11:
     name: Reference resolver is a pluggable pipeline with MCP auto-discovery and document-name capture
     status: identified
@@ -97,7 +149,7 @@ targets:
     context: 'Generalises the URL-extraction idea into an extensible resolver stack. Each captured string (from OCR or transcript) passes through stages: regex patterns → embedding similarity against known reference shapes → LLM classification → MCP server call. Built-in resolvers for URLs, Jira tickets, Confluence page titles, GitHub PRs/issues, Slack permalinks. Non-slide text references are captured too — the PowerPoint window-title "Deck.pptx - PowerPoint" gives the source document name; Teams chat-pane OCR gives in-meeting links; Keynote/Google-Slides title bars give deck provenance. Unknown patterns surface as candidate new resolvers ("I saw 47 strings matching FOO-\\d+ that no resolver recognised — is there an MCP server for this?"). Output feeds every downstream consumer: the context fetcher, contradiction detector, cognitive-augmentation sidebar, dejargoniser.'
     depends_on:
     - T1.3
-    - T9
+    - T9.2
     origin: manual
     discovered: 2026-04-14
   T12:
@@ -114,7 +166,7 @@ targets:
     - Re-running on the same meeting ID does not destroy the prior artifact (append / version / refuse-and-warn)
     context: 'Final output shape: a folder per meeting containing slides/*.png, transcript.md (speaker-attributed, slide-aligned), decisions.md, actions.md (with inferred assignees), references.json (resolved), contradictions.md, open-questions.md. Destination is configurable; the natural default is a designated "meetings" repo''s docs/ subdirectory so mnemo will index it automatically (see companion mnemo target). Rerun safety: re-capturing the same meeting appends or versions rather than destroys. Replaces ad-hoc PNG dumps with a mnemo-indexable, human-readable artifact that''s joinable against code commits, Jira tickets, and prior meetings.'
     depends_on:
-    - T9
+    - T9.3
     - T11
     origin: manual
     discovered: 2026-04-14
@@ -323,7 +375,7 @@ targets:
     discovered: 2026-04-14
   T9:
     name: System audio is captured alongside frames and transcribed locally with speaker attribution
-    status: identified
+    status: achieved
     value: 13.0
     cost: 8.0
     observable: true
@@ -337,3 +389,55 @@ targets:
     - T1.3
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-15
+  T9.1:
+    name: pageflip captures system audio to a WAV file alongside frames on macOS
+    status: identified
+    value: 8.0
+    cost: 3.0
+    observable: true
+    acceptance:
+    - System audio is captured on macOS via ScreenCaptureKit's audio stream, independently of frame capture
+    - '`pageflip --audio --output <dir>` writes an `audio.wav` file in the output directory while the capture loop runs'
+    - WAV is 16-bit PCM at 48 kHz stereo (or whatever ScreenCaptureKit natively delivers, documented in --help-agent)
+    - Stopping pageflip with Ctrl-C finalises the WAV header cleanly (no truncated/broken file)
+    - Audio capture failures (e.g., permission denied) surface a useful error without crashing the frame loop
+    context: 'First sub-target split out of T9. Delivers the raw audio signal in a consumable container (WAV). Downstream targets (T9.2 transcription, T9.3 diarisation) build on this. Observable checkpoint: a playable audio.wav file that the user can open in QuickTime and hear the meeting audio. Requires objc2-screencapturekit or direct Apple FFI bindings; xcap does not expose audio.'
+    depends_on:
+    - T1.3
+    origin: manual
+    discovered: 2026-04-15
+  T9.2:
+    name: Captured audio is transcribed locally via Whisper into timestamped text segments
+    status: identified
+    value: 8.0
+    cost: 3.0
+    observable: true
+    acceptance:
+    - A local Whisper integration (distil-large-v3 or large-v3-turbo by default, large-v3 optional) transcribes the captured audio.wav
+    - Transcription runs at ≥ 5x real-time on a 16-GPU M4 with 48 GB RAM
+    - Transcript segments are written as `transcript.jsonl` in the output directory with `{start_ms, end_ms, text}` rows
+    - Model path / preset is configurable via CLI or config file; first-run downloads the model from a known mirror
+    - Transcription can run live (streaming) OR post-hoc on the final audio.wav — document which mode is shipped
+    context: 'Second sub-target of T9. Turns the raw WAV into searchable, structured transcript segments. Uses whisper-rs (Rust bindings for whisper.cpp) or a similar local inference path. Model sizing tuned for the user''s 48 GB / 16-GPU work machine. Observable checkpoint: transcript.jsonl the user can read with `jq`. Diarisation and slide alignment come in T9.3.'
+    depends_on:
+    - T9.1
+    origin: manual
+    discovered: 2026-04-15
+  T9.3:
+    name: Transcript segments carry speaker attribution and slide alignment
+    status: identified
+    value: 8.0
+    cost: 5.0
+    observable: true
+    acceptance:
+    - Speaker diarisation assigns stable speaker IDs per utterance (pyannote.audio via a subprocess, or equivalent Rust-callable tool)
+    - Each transcript segment is tagged with the slide_id visible at `t_start` (joining against the PNG stream's mtime/timestamp)
+    - Optional config maps speaker IDs to display names
+    - '`transcript.jsonl` rows grow to `{slide_id, t_start_ms, t_end_ms, text, speaker_id}` without breaking existing consumers'
+    - Diarisation cost does not block real-time capture — runs as a post-processing pass OR asynchronously
+    context: Third sub-target of T9. Joins the transcript to the slide stream (so T12's meeting artifact can render a time-aligned transcript next to slides) and adds speaker IDs (so T14 can attribute contradictions and T13 can know who said what). Together T9.1+T9.2+T9.3 satisfy the original T9 acceptance; retiring this sub-target should retire T9.
+    depends_on:
+    - T9.2
+    origin: manual
+    discovered: 2026-04-15
