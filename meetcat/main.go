@@ -3,10 +3,12 @@
 
 // meetcat — consumer of pageflip's slide-event NDJSON stream.
 //
-// This is the 🎯T19.1 walking skeleton: meetcat reads slide events from
-// stdin, validates required fields, and prints a short summary per event
-// to stderr. Subsequent sub-targets (T19.2 session-mode claudia agents,
-// T19.3 TUI, T19.4 OSC 8 hyperlinks) build on this shell.
+// This is the 🎯T19.1 walking skeleton extended with:
+//   - 🎯T21: doctor subcommand for diagnostic output
+//   - 🎯T21: --log-file for structured NDJSON session logging
+//
+// Subsequent sub-targets (T19.2 session-mode claudia agents, T19.3 TUI,
+// T19.4 OSC 8 hyperlinks) build on this shell.
 package main
 
 import (
@@ -21,6 +23,13 @@ import (
 
 const version = "0.0.1"
 
+// gitSHA is optionally set at link time via:
+//
+//	go build -ldflags "-X main.gitSHA=$(git rev-parse --short HEAD)"
+//
+// Falls back to "(dev)" when not provided.
+var gitSHA = "(dev)"
+
 const helpAgent = `meetcat --help-agent
 ====================
 
@@ -34,9 +43,19 @@ PURPOSE
 INVOCATION
   pageflip --events-out stdout | meetcat
   meetcat < events.jsonl
+  meetcat --log-file session.ndjson
+  meetcat doctor [--log-file session.ndjson]
   meetcat --help
   meetcat --help-agent
   meetcat --version
+
+SUBCOMMANDS
+  doctor   Print a markdown diagnostic report (versions, tools, auth, log).
+
+FLAGS
+  --log-file <path>   Write a structured NDJSON session log to <path>.
+                      Events contain no meeting content — only identifiers,
+                      token counts, costs, and categorical codes.
 
 INPUT CONTRACT
   Stdin is NDJSON: one JSON object per newline, matching
@@ -56,7 +75,7 @@ EXIT CODES
   2  CLI argument parse error (flag package default).
 
 TARGETS
-  See pageflip's bullseye.yaml for the T19.x family.
+  See pageflip's bullseye.yaml for the T19.x and T21 families.
 `
 
 // slideEvent mirrors the shape pageflip emits under --events-out. Fields
@@ -86,14 +105,27 @@ func (e *slideEvent) validate() error {
 }
 
 func main() {
+	// Subcommand dispatch: check os.Args[1] before flag.Parse.
+	if len(os.Args) >= 2 && os.Args[1] == "doctor" {
+		doctorFlags := flag.NewFlagSet("doctor", flag.ExitOnError)
+		logFile := doctorFlags.String("log-file", "", "Path to NDJSON session log to tail.")
+		if err := doctorFlags.Parse(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "meetcat doctor:", err)
+			os.Exit(2)
+		}
+		runDoctor(os.Stdout, *logFile)
+		return
+	}
+
 	showVersion := flag.Bool("version", false, "Print version and exit.")
 	showHelp := flag.Bool("help", false, "Print help and exit.")
 	showHelpAgent := flag.Bool("help-agent", false, "Print machine-readable help and exit.")
+	logFile := flag.String("log-file", "", "Path to write NDJSON session log (append, created if absent).")
 	flag.Parse()
 
 	switch {
 	case *showVersion:
-		fmt.Println("meetcat", version)
+		fmt.Printf("meetcat %s (sha: %s)\n", version, gitSHA)
 		return
 	case *showHelpAgent:
 		fmt.Print(helpAgent)
@@ -103,13 +135,25 @@ func main() {
 		return
 	}
 
-	if err := run(os.Stdin, os.Stderr); err != nil {
+	var logger *Logger
+	if *logFile != "" {
+		var f *os.File
+		var err error
+		logger, f, err = NewFileLogger(*logFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "meetcat:", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+	}
+
+	if err := run(os.Stdin, os.Stderr, logger); err != nil {
 		fmt.Fprintln(os.Stderr, "meetcat:", err)
 		os.Exit(1)
 	}
 }
 
-func run(in io.Reader, summary io.Writer) error {
+func run(in io.Reader, summary io.Writer, logger *Logger) error {
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
@@ -117,15 +161,24 @@ func run(in io.Reader, summary io.Writer) error {
 		var ev slideEvent
 		switch err := dec.Decode(&ev); {
 		case errors.Is(err, io.EOF):
+			logger.LogMeetingEnd(count, 0)
 			fmt.Fprintf(summary, "meetcat: processed %d slide event(s)\n", count)
 			return nil
 		case err != nil:
+			logger.LogRejected("decode_error")
 			return fmt.Errorf("decode event %d: %w", count+1, err)
 		}
+
+		logger.LogReceived(ev.SlideID, "")
+
 		if err := ev.validate(); err != nil {
+			logger.LogRejected("validation_failed")
 			return fmt.Errorf("event %d: %w", count+1, err)
 		}
+
+		logger.LogValidated(ev.SlideID)
 		count++
+
 		front := ev.FrontmostApp
 		if front == "" {
 			front = "-"

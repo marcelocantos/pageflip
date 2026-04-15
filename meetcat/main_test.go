@@ -12,7 +12,7 @@ import (
 func TestRunMinimalEvent(t *testing.T) {
 	in := strings.NewReader(`{"slide_id":"s1","path":"/tmp/s1.png","t_start_ms":100,"t_end_ms":120}` + "\n")
 	var out bytes.Buffer
-	if err := run(in, &out); err != nil {
+	if err := run(in, &out, nil); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 	if !strings.Contains(out.String(), "s1") {
@@ -29,7 +29,7 @@ func TestRunRichEvent(t *testing.T) {
 		`"frontmost_app":"Teams"}`
 	in := strings.NewReader(evt + "\n")
 	var out bytes.Buffer
-	if err := run(in, &out); err != nil {
+	if err := run(in, &out, nil); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 	if !strings.Contains(out.String(), "app=Teams") {
@@ -40,7 +40,7 @@ func TestRunRichEvent(t *testing.T) {
 func TestRunRejectsMissingSlideID(t *testing.T) {
 	in := strings.NewReader(`{"path":"/p.png","t_start_ms":0,"t_end_ms":1}` + "\n")
 	var out bytes.Buffer
-	if err := run(in, &out); err == nil {
+	if err := run(in, &out, nil); err == nil {
 		t.Fatalf("expected error on missing slide_id")
 	} else if !strings.Contains(err.Error(), "slide_id") {
 		t.Fatalf("error did not mention slide_id: %v", err)
@@ -50,7 +50,7 @@ func TestRunRejectsMissingSlideID(t *testing.T) {
 func TestRunRejectsTimeInversion(t *testing.T) {
 	in := strings.NewReader(`{"slide_id":"s","path":"/p","t_start_ms":100,"t_end_ms":50}` + "\n")
 	var out bytes.Buffer
-	if err := run(in, &out); err == nil {
+	if err := run(in, &out, nil); err == nil {
 		t.Fatalf("expected error on inverted timestamps")
 	}
 }
@@ -63,10 +63,29 @@ func TestRunMultiEvent(t *testing.T) {
 	}
 	in := strings.NewReader(strings.Join(events, "\n") + "\n")
 	var out bytes.Buffer
-	if err := run(in, &out); err != nil {
+	if err := run(in, &out, nil); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 	if !strings.Contains(out.String(), "processed 3") {
 		t.Fatalf("expected processed 3 in %q", out.String())
+	}
+}
+
+func TestRunWithLogger(t *testing.T) {
+	in := strings.NewReader(`{"slide_id":"logged-slide","path":"/p.png","t_start_ms":0,"t_end_ms":10}` + "\n")
+	var summary bytes.Buffer
+	var logBuf bytes.Buffer
+	logger := &Logger{w: &logBuf}
+	if err := run(in, &summary, logger); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "received") {
+		t.Errorf("log missing 'received' event; got: %q", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "validated") {
+		t.Errorf("log missing 'validated' event; got: %q", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "meeting_end") {
+		t.Errorf("log missing 'meeting_end' event; got: %q", logBuf.String())
 	}
 }
