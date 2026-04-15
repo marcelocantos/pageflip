@@ -23,6 +23,8 @@ path = "src/bin/pageflip-feed.rs"
 bytemuck = "1"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 image_hasher = "3"
 notify = "7.0.0"
 screencapturekit = "1"

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/marcelocantos/pageflip/blob/master/docs/slide-event-schema.json",
+  "title": "SlideEvent",
+  "description": "One NDJSON line written to --events-out per saved slide. Required fields are always present; optional fields are omitted when the relevant capability (OCR, transcription, frontmost-app) has not yet landed.",
+  "type": "object",
+  "required": ["slide_id", "path", "t_start_ms", "t_end_ms"],
+  "additionalProperties": false,
+  "properties": {
+    "slide_id": {
+      "type": "string",
+      "description": "Timestamp-based identifier derived from the PNG filename without extension (e.g. '20260415T130050Z'). Unique within a session.",
+      "examples": ["20260415T130050Z"]
+    },
+    "path": {
+      "type": "string",
+      "description": "Absolute filesystem path of the saved PNG.",
+      "examples": ["/tmp/pageflip-1744722050/20260415T130050Z.png"]
+    },
+    "t_start_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Unix epoch time in milliseconds at the moment capture of this frame began.",
+      "examples": [1744722050000]
+    },
+    "t_end_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Unix epoch time in milliseconds at the moment the PNG was fully written to disk.",
+      "examples": [1744722050045]
+    },
+    "ocr": {
+      "type": "array",
+      "description": "OCR words extracted from the frame (populated by 🎯T10.2; omitted until then).",
+      "items": {
+        "type": "object",
+        "required": ["text", "bbox"],
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Recognised word."
+          },
+          "bbox": {
+            "type": "array",
+            "description": "Bounding box as [x, y, width, height] in normalised 0–1 coordinates relative to the frame.",
+            "items": { "type": "number" },
+            "minItems": 4,
+            "maxItems": 4
+          }
+        }
+      }
+    },
+    "transcript_window": {
+      "type": "array",
+      "description": "Audio transcript segments active at the time of capture (populated by 🎯T9.2; omitted until then).",
+      "items": {
+        "type": "object",
+        "required": ["text", "start_ms", "end_ms"],
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Transcript text."
+          },
+          "start_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Segment start time in milliseconds since Unix epoch."
+          },
+          "end_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Segment end time in milliseconds since Unix epoch."
+          }
+        }
+      }
+    },
+    "frontmost_app": {
+      "type": "string",
+      "description": "Bundle ID or display name of the application in the foreground at capture time (populated by 🎯T10.3; omitted until then).",
+      "examples": ["com.apple.Keynote", "Microsoft PowerPoint"]
+    }
+  },
+  "examples": [
+    {
+      "slide_id": "20260415T130050Z",
+      "path": "/tmp/pageflip-1744722050/20260415T130050Z.png",
+      "t_start_ms": 1744722050000,
+      "t_end_ms": 1744722050045
+    },
+    {
+      "slide_id": "20260415T130052Z",
+      "path": "/tmp/pageflip-1744722050/20260415T130052Z.png",
+      "t_start_ms": 1744722052000,
+      "t_end_ms": 1744722052038,
+      "frontmost_app": "com.apple.Keynote",
+      "ocr": [
+        { "text": "Hello", "bbox": [0.1, 0.05, 0.15, 0.08] },
+        { "text": "World", "bbox": [0.3, 0.05, 0.15, 0.08] }
+      ]
+    }
+  ]
+}

@@ -49,6 +49,20 @@ OPTIONS
   --transcriber KIND Transcriber to use with --audio. `null` (default)
                      discards samples and prints a batch count on stop.
                      WhisperX support arrives with 🎯T9.2.
+  --events-out SPEC  Emit one structured JSON object per saved slide
+                     (NDJSON) to SPEC instead of the legacy path-per-line
+                     stdout contract. SPEC accepts three forms:
+                       stdout       — write to stdout
+                       fd:<N>       — write to open file descriptor N
+                       <path>       — write (create/truncate) to a file
+                     Each line is a complete JSON object followed by a
+                     newline and is flushed immediately so tailing
+                     consumers (e.g. `pageflip-feed --pipe`) see each
+                     event as it lands. The schema is documented in
+                     docs/slide-event-schema.json. Optional fields
+                     (ocr, transcript_window, frontmost_app) are omitted
+                     until the corresponding capabilities land
+                     (🎯T10.2, 🎯T9.2, 🎯T10.3).
   --redact-faces     Run every saved frame through Apple Vision's face
                      detector and blur the detected rectangles before the
                      PNG is written. macOS only. No-op if no faces are
@@ -72,9 +86,26 @@ EXIT CODES
   2   clap-level argument parse error (wrong flag, malformed value).
 
 OUTPUT CONTRACT
-  One line is written to stdout per saved PNG, formatted as:
-      <absolute-path>\n
-  Downstream consumers (e.g. the T5 feeder) tail this stream.
+  Two modes, selected by whether --events-out is present:
+
+  Legacy mode (default, --events-out absent):
+      One line written to stdout per saved PNG:
+          <absolute-path>\n
+      Downstream consumers (e.g. `pageflip-feed --watch`) rely on this.
+
+  Structured mode (--events-out SPEC):
+      One JSON object per line (NDJSON) written to SPEC per saved PNG.
+      Format is defined in docs/slide-event-schema.json. Required fields:
+          slide_id     — timestamp slug (e.g. "20260415T130050Z")
+          path         — absolute path to the saved PNG
+          t_start_ms   — Unix epoch ms when capture of this frame began
+          t_end_ms     — Unix epoch ms when the PNG was fully written
+      Optional fields (omitted when capability is not yet active):
+          ocr              — OCR words (🎯T10.2)
+          transcript_window — audio transcript segments (🎯T9.2)
+          frontmost_app    — foreground app at capture time (🎯T10.3)
+      Each line is flushed immediately. Consume with:
+          pageflip --events-out stdout ... | pageflip-feed --pipe ...
 
 LOOP BEHAVIOUR
   pageflip runs an interval loop: capture, hash with pHash (8x8 DCT +

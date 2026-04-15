@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use serde::Deserialize;
 
 const HELP_AGENT: &str = include_str!("help_agent_feed.txt");
 
@@ -22,9 +24,17 @@ const HELP_AGENT: &str = include_str!("help_agent_feed.txt");
                   downstream consumer of the stream produced by `pageflip`."
 )]
 struct Cli {
-    /// Directory to watch for new PNG files.
-    #[arg(long, value_name = "DIR")]
-    watch: PathBuf,
+    /// Directory to watch for new PNG files (existing directory-watch mode).
+    /// Mutually exclusive with --pipe.
+    #[arg(long, value_name = "DIR", conflicts_with = "pipe")]
+    watch: Option<PathBuf>,
+
+    /// Read slide events from stdin instead of watching a directory.
+    /// Accepts either path-per-line (legacy) or NDJSON (--events-out) format;
+    /// the format is auto-detected from the first non-empty line.
+    /// Mutually exclusive with --watch.
+    #[arg(long, conflicts_with = "watch")]
+    pipe: bool,
 
     /// Claude Code session ID to resume. Required; the feeder exits before
     /// starting the watch loop if this is absent.
@@ -65,16 +75,31 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Minimal subset of SlideEvent needed to extract the path.
+#[derive(Deserialize)]
+struct SlideEventRef {
+    path: PathBuf,
+}
+
 fn run(cli: &Cli) -> Result<(), String> {
     let session_id = cli.session_id.as_deref().ok_or(
         "--session-id is required; find your session ID with `claude --list-sessions` \
          and pass it via --session-id <ID>",
     )?;
 
-    if !cli.watch.is_dir() {
+    if cli.pipe {
+        return run_pipe(session_id, &cli.prompt, &cli.claude);
+    }
+
+    let watch_dir = cli
+        .watch
+        .as_ref()
+        .ok_or("either --watch <DIR> or --pipe is required")?;
+
+    if !watch_dir.is_dir() {
         return Err(format!(
             "--watch {:?} is not a directory or does not exist",
-            cli.watch
+            watch_dir
         ));
     }
 
@@ -86,12 +111,12 @@ fn run(cli: &Cli) -> Result<(), String> {
     .map_err(|e| format!("failed to create filesystem watcher: {e}"))?;
 
     watcher
-        .watch(&cli.watch, RecursiveMode::NonRecursive)
-        .map_err(|e| format!("failed to watch {:?}: {e}", cli.watch))?;
+        .watch(watch_dir, RecursiveMode::NonRecursive)
+        .map_err(|e| format!("failed to watch {:?}: {e}", watch_dir))?;
 
     eprintln!(
         "pageflip-feed: watching {:?} for new PNGs (session {}); Ctrl-C to stop",
-        cli.watch, session_id
+        watch_dir, session_id
     );
 
     // Tracks canonical paths already fed to prevent duplicate events.
@@ -119,6 +144,52 @@ fn run(cli: &Cli) -> Result<(), String> {
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Read lines from stdin. Auto-detect format from the first non-empty line:
+/// - starts with `{` → NDJSON (SlideEvent); extract `path`
+/// - otherwise → legacy path-per-line
+fn run_pipe(session_id: &str, prompt: &str, claude: &str) -> Result<(), String> {
+    eprintln!("pageflip-feed: reading from stdin (session {session_id}); Ctrl-D to stop");
+
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+
+    // Peek at the first non-empty line to detect format.
+    let first = loop {
+        match lines.next() {
+            None => return Ok(()),
+            Some(Err(e)) => return Err(format!("stdin read error: {e}")),
+            Some(Ok(line)) if line.trim().is_empty() => continue,
+            Some(Ok(line)) => break line,
+        }
+    };
+
+    let is_ndjson = first.trim_start().starts_with('{');
+
+    // Process the first line, then continue with remaining lines.
+    let all = std::iter::once(Ok(first)).chain(lines);
+    for line in all {
+        let line = line.map_err(|e| format!("stdin read error: {e}"))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = if is_ndjson {
+            match serde_json::from_str::<SlideEventRef>(trimmed) {
+                Ok(ev) => ev.path,
+                Err(e) => {
+                    eprintln!("pageflip-feed: skipping malformed NDJSON line: {e}");
+                    continue;
+                }
+            }
+        } else {
+            PathBuf::from(trimmed)
+        };
+        feed_slide(&path, session_id, prompt, claude);
     }
 
     Ok(())

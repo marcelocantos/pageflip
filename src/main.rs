@@ -4,6 +4,7 @@
 mod audio;
 mod capture;
 mod dedup;
+mod events;
 mod picker;
 mod redact;
 
@@ -13,10 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use time::OffsetDateTime;
+
+use events::{EventSink, SlideEvent};
 
 use audio::{AudioCaptureHandle, NullTranscriber, Transcriber};
 use capture::{default_backend, Capture, CropSpec, Region, WindowSpec};
@@ -103,6 +106,13 @@ struct Cli {
     /// WhisperX support arrives with 🎯T9.2.
     #[arg(long, value_name = "KIND", default_value = "null")]
     transcriber: String,
+
+    /// Emit one structured JSON object per saved slide (NDJSON).
+    /// SPEC can be `stdout`, `fd:<N>`, or a file path.
+    /// When absent, the legacy stdout contract (one absolute path per line)
+    /// is preserved for backwards compatibility.
+    #[arg(long, value_name = "SPEC")]
+    events_out: Option<String>,
 
     /// Print agent-oriented help (machine-readable invocation notes) and exit.
     #[arg(long, exclusive = true)]
@@ -203,6 +213,12 @@ fn run(cli: &Cli) -> Result<(), String> {
     let mut dedup = Dedup::new(cli.threshold);
     let redact = build_redact_pipeline(cli);
 
+    let mut sink = cli
+        .events_out
+        .as_deref()
+        .map(events::parse_events_out)
+        .transpose()?;
+
     let audio_handle = if cli.audio {
         Some(start_audio_capture(&cli.transcriber)?)
     } else {
@@ -230,7 +246,14 @@ fn run(cli: &Cli) -> Result<(), String> {
     loop {
         let tick_start = std::time::Instant::now();
 
-        capture_once(backend.as_ref(), &target, &mut dedup, &redact, &output_dir)?;
+        capture_once(
+            backend.as_ref(),
+            &target,
+            &mut dedup,
+            &redact,
+            &output_dir,
+            sink.as_mut(),
+        )?;
 
         let remaining = interval.saturating_sub(tick_start.elapsed());
         if remaining.is_zero() {
@@ -366,7 +389,10 @@ fn capture_once(
     dedup: &mut Dedup,
     redact: &Option<RedactPipeline>,
     output_dir: &Path,
+    sink: Option<&mut EventSink>,
 ) -> Result<(), String> {
+    let t_start_ms = unix_ms();
+
     let frame = match target {
         Target::Region(r) => backend.capture(*r),
         Target::Window(spec) => backend.capture_window(spec),
@@ -380,20 +406,48 @@ fn capture_once(
         Some(pipeline) => pipeline.apply(frame).map_err(|e| e.to_string())?,
         None => frame,
     };
-    let filename = format!("{}.png", timestamp_slug());
-    let path = output_dir.join(filename);
+    let slug = timestamp_slug();
+    let filename = format!("{slug}.png");
+    let path = output_dir.join(&filename);
     frame.save_png(&path).map_err(|e| e.to_string())?;
+
+    let t_end_ms = unix_ms();
 
     let absolute = path
         .canonicalize()
         .unwrap_or_else(|_| output_dir.join(path.file_name().unwrap()));
-    // The downstream feeder (🎯T5) relies on one line per saved PNG on stdout.
-    // Flush explicitly so consumers don't buffer a slide.
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{}", absolute.display())
-        .and_then(|_| stdout.flush())
-        .map_err(|e| format!("stdout write failed: {e}"))?;
+
+    if let Some(sink) = sink {
+        // --events-out mode: emit structured NDJSON. Downstream can derive
+        // the plain path from ev.path, so we do not also write the legacy line.
+        let ev = SlideEvent {
+            slide_id: slug,
+            path: absolute,
+            t_start_ms,
+            t_end_ms,
+            ocr: None,
+            transcript_window: None,
+            frontmost_app: None,
+        };
+        sink.write(&ev)
+            .map_err(|e| format!("events-out write failed: {e}"))?;
+    } else {
+        // Legacy contract: one absolute path per line on stdout.
+        // The downstream feeder (🎯T5) relies on this.
+        let mut stdout = io::stdout().lock();
+        writeln!(stdout, "{}", absolute.display())
+            .and_then(|_| stdout.flush())
+            .map_err(|e| format!("stdout write failed: {e}"))?;
+    }
     Ok(())
+}
+
+/// Returns milliseconds since the Unix epoch.
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn build_redact_pipeline(cli: &Cli) -> Option<RedactPipeline> {
