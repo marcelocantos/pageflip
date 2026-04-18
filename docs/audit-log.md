@@ -2,7 +2,7 @@
 
 ## 2026-04-18 — /release v0.1.0
 
-- **Commit**: pending
+- **Commit**: `a88cf3b`
 - **Outcome**: First release. macOS arm64 + Linux x86_64/arm64 binaries via
   GitHub Actions. Homebrew formula published to `marcelocantos/homebrew-tap`.
   Ships `pageflip` (capture loop), `pageflip-feed` (headless feeder), and
