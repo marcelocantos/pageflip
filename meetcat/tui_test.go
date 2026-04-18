@@ -302,6 +302,53 @@ func TestTUIWindowResize(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// OSC 8 URL wrapping (🎯T19.4)
+// ---------------------------------------------------------------------------
+
+func TestWrapURLsNoURL(t *testing.T) {
+	s := "no urls here"
+	if got := wrapURLs(s); got != s {
+		t.Errorf("no-URL string should be unchanged; got %q", got)
+	}
+}
+
+func TestWrapURLsHTTP(t *testing.T) {
+	s := "see http://example.com for details"
+	got := wrapURLs(s)
+	// Must contain the OSC 8 opener and the URL itself.
+	if !strings.Contains(got, "\x1b]8;;http://example.com\x07") {
+		t.Errorf("missing OSC 8 open; got %q", got)
+	}
+	// Must contain the OSC 8 closer.
+	if !strings.Contains(got, "\x1b]8;;\x07") {
+		t.Errorf("missing OSC 8 close; got %q", got)
+	}
+	// Surrounding text must be preserved.
+	if !strings.Contains(got, "see ") || !strings.Contains(got, " for details") {
+		t.Errorf("surrounding text lost; got %q", got)
+	}
+}
+
+func TestWrapURLsHTTPS(t *testing.T) {
+	s := "visit https://example.org"
+	got := wrapURLs(s)
+	if !strings.Contains(got, "\x1b]8;;https://example.org\x07") {
+		t.Errorf("HTTPS URL not wrapped; got %q", got)
+	}
+}
+
+func TestWrapURLsMultiple(t *testing.T) {
+	s := "a http://one.com b https://two.org c"
+	got := wrapURLs(s)
+	if !strings.Contains(got, "http://one.com") {
+		t.Errorf("first URL not present; got %q", got)
+	}
+	if !strings.Contains(got, "https://two.org") {
+		t.Errorf("second URL not present; got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

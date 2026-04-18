@@ -110,6 +110,35 @@ func (e *slideEvent) validate() error {
 	return nil
 }
 
+// writeSessionIDsIfPossible persists session IDs to the artifact folder
+// when the pool has a workDir configured. Errors are printed to w but
+// do not abort the shutdown sequence (🎯T15).
+func writeSessionIDsIfPossible(pool *SessionPool, w io.Writer) {
+	ids := pool.SessionIDs()
+	if len(ids) == 0 {
+		return
+	}
+	// Use workDir as the artifact output root when no explicit config is set.
+	aw := NewArtifactWriter(ArtifactConfig{
+		OutputDir: pool.workDir,
+		MeetingID: pool.meetingID,
+	})
+	if err := aw.WriteSessionIDs(ids); err != nil {
+		fmt.Fprintf(w, "meetcat: write session-ids: %v\n", err)
+	}
+}
+
+// printNeutralAttachHint prints the command to re-attach to the neutral
+// session on stderr so the user knows how to resume (🎯T15).
+func printNeutralAttachHint(pool *SessionPool, w io.Writer) {
+	neutral := pool.NeutralAgent()
+	if neutral == nil {
+		return
+	}
+	fmt.Fprintf(w, "\nmeetcat: neutral session still alive — to resume:\n")
+	fmt.Fprintf(w, "  meetcat attach --meeting %s neutral\n", pool.meetingID)
+}
+
 func main() {
 	// Subcommand dispatch: check os.Args[1] before flag.Parse.
 	if len(os.Args) >= 2 {
@@ -154,6 +183,7 @@ func main() {
 	logFile := flag.String("log-file", "", "Path to write NDJSON session log (append, created if absent).")
 	enableAgents := flag.Bool("agents", false, "Spawn claudia specialist sessions for each slide.")
 	workDir := flag.String("work-dir", ".", "Working directory passed to claudia agents.")
+	specialistsFlag := flag.String("specialists", "", "Comma-separated list of specialists to start (default: all). E.g. skeptic,neutral")
 	flag.Parse()
 
 	switch {
@@ -183,7 +213,8 @@ func main() {
 	var pool *SessionPool
 	if *enableAgents {
 		meetingID := MeetingSessionID()
-		pool = NewSessionPool(meetingID, *workDir, os.Stderr, logger)
+		allowedNames := ParseSpecialistNames(*specialistsFlag)
+		pool = NewSessionPool(meetingID, *workDir, os.Stderr, logger, allowedNames)
 	}
 
 	if err := run(context.Background(), os.Stdin, os.Stderr, logger, pool); err != nil {
@@ -235,6 +266,8 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 	if pool != nil {
 		defer func() {
 			pool.StopAll()
+			writeSessionIDsIfPossible(pool, os.Stderr)
+			printNeutralAttachHint(pool, os.Stderr)
 			ts := pool.TurnSummary()
 			fmt.Fprintln(summary, "meetcat: specialist turn counts:")
 			for name, n := range ts {
@@ -317,6 +350,8 @@ func runTUI(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger
 		defer func() {
 			logger.LogMeetingEnd(count, 0)
 			pool.StopAll()
+			writeSessionIDsIfPossible(pool, os.Stderr)
+			printNeutralAttachHint(pool, os.Stderr)
 			close(msgCh)
 			prog.Send(tuiStopMsg{})
 		}()

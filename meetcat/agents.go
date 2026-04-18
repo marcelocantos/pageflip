@@ -5,27 +5,66 @@
 //
 // This file implements 🎯T19.2: spawning persistent claudia.Agent
 // sessions and streaming slide events into them.
+// 🎯T13: prompts loaded from meetcat/prompts/*.md; --specialists flag.
+// 🎯T15: neutral session stays alive after StopAll; SessionIDs exported.
 package main
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/marcelocantos/claudia"
 )
 
-// System prompts for each specialist. Short inline strings; will be
-// moved to config files in 🎯T13.
-const skepticPrompt = `You are a skeptical meeting analyst. For each slide, surface: assumptions that aren't stated, numbers that need sources, claims that contradict prior slides, and questions the presenter should be asked. Be concise — 3-5 bullets max.`
+// Default system prompts (inline fallbacks when config files are absent).
+// These strings must exactly match the content in meetcat/prompts/*.md so
+// that adding the files has no observable behaviour change.
+const defaultSkepticPrompt = `You are a skeptical meeting analyst. For each slide, surface: assumptions that aren't stated, numbers that need sources, claims that contradict prior slides, and questions the presenter should be asked. Be concise — 3-5 bullets max.`
 
-const constructivePrompt = `You are a constructive meeting analyst. For each slide, suggest: additions that would strengthen the argument, connections to other initiatives the team should know about, and "yes-and" extensions. Be concise — 3-5 bullets max.`
+const defaultConstructivePrompt = `You are a constructive meeting analyst. For each slide, suggest: additions that would strengthen the argument, connections to other initiatives the team should know about, and "yes-and" extensions. Be concise — 3-5 bullets max.`
 
-const neutralPrompt = `You are a neutral meeting analyst. For each slide, provide: links to relevant prior decisions, paste-able URLs to authoritative sources mentioned, and factual context the audience might lack. Be concise — 3-5 bullets max.`
+const defaultNeutralPrompt = `You are a neutral meeting analyst. For each slide, provide: links to relevant prior decisions, paste-able URLs to authoritative sources mentioned, and factual context the audience might lack. Be concise — 3-5 bullets max.`
 
-const dejargoniserPrompt = `You are an acronym and jargon tracker. For each slide, identify abbreviations and jargon. If you know the expansion, state it. If unknown, say "unknown — first seen on this slide". Accumulate a running glossary across slides.`
+const defaultDejargoniserPrompt = `You are an acronym and jargon tracker. For each slide, identify abbreviations and jargon. If you know the expansion, state it. If unknown, say "unknown — first seen on this slide". Accumulate a running glossary across slides.`
+
+// promptsDir returns the directory that contains meetcat/prompts/ relative
+// to the current source file at compile time. Falls back to "" (CWD) when
+// the path cannot be determined (e.g. stripped binaries).
+func promptsDir() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(file), "prompts")
+}
+
+// loadPrompt reads a prompt from {promptsDir}/{name}.md. Falls back to
+// the provided default string if the file is absent or unreadable.
+func loadPrompt(name, defaultPrompt string) string {
+	dir := promptsDir()
+	if dir == "" {
+		return defaultPrompt
+	}
+	path := filepath.Join(dir, name+".md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// File absent or unreadable — use embedded default.
+		return defaultPrompt
+	}
+	// Trim trailing newline added by editors; preserve the inline style.
+	s := strings.TrimRight(string(data), "\n")
+	if s == "" {
+		return defaultPrompt
+	}
+	return s
+}
 
 // specialistDef describes one specialist agent configuration.
 type specialistDef struct {
@@ -34,14 +73,47 @@ type specialistDef struct {
 	prompt string
 }
 
-// allSpecialists returns the canonical list of specialist definitions.
+// allSpecialists returns the canonical list of specialist definitions,
+// loading prompts from config files when available.
 func allSpecialists() []specialistDef {
 	return []specialistDef{
-		{"skeptic", "sonnet", skepticPrompt},
-		{"constructive", "sonnet", constructivePrompt},
-		{"neutral", "sonnet", neutralPrompt},
-		{"dejargoniser", "haiku", dejargoniserPrompt},
+		{"skeptic", "sonnet", loadPrompt("skeptic", defaultSkepticPrompt)},
+		{"constructive", "sonnet", loadPrompt("constructive", defaultConstructivePrompt)},
+		{"neutral", "sonnet", loadPrompt("neutral", defaultNeutralPrompt)},
+		{"dejargoniser", "haiku", loadPrompt("dejargoniser", defaultDejargoniserPrompt)},
 	}
+}
+
+// filterSpecialists returns only the definitions whose names appear in
+// the allow set. If allow is nil or empty, all definitions are returned.
+func filterSpecialists(defs []specialistDef, allow map[string]bool) []specialistDef {
+	if len(allow) == 0 {
+		return defs
+	}
+	out := make([]specialistDef, 0, len(allow))
+	for _, d := range defs {
+		if allow[d.name] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// ParseSpecialistNames splits a comma-separated list of specialist names
+// into a set. Names are trimmed and lowercased. Returns nil on empty input.
+func ParseSpecialistNames(raw string) map[string]bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	set := make(map[string]bool)
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(strings.ToLower(part))
+		if name != "" {
+			set[name] = true
+		}
+	}
+	return set
 }
 
 // specialistState holds a running specialist agent and its metrics.
@@ -61,6 +133,10 @@ type SessionPool struct {
 	logger    *Logger
 	stderr    io.Writer
 
+	// allowedNames is the optional filter set from --specialists.
+	// nil means all specialists are allowed.
+	allowedNames map[string]bool
+
 	mu          sync.Mutex
 	specialists map[string]*specialistState // guarded by mu; keyed by name
 }
@@ -79,21 +155,23 @@ func specialistSessionID(meetingID, name string) string {
 
 // NewSessionPool creates a pool but does not start any agents yet.
 // workDir is the working directory passed to claudia.Start.
-func NewSessionPool(meetingID, workDir string, stderr io.Writer, logger *Logger) *SessionPool {
+// allowedNames, if non-nil, restricts which specialists are started.
+func NewSessionPool(meetingID, workDir string, stderr io.Writer, logger *Logger, allowedNames map[string]bool) *SessionPool {
 	return &SessionPool{
-		meetingID:   meetingID,
-		workDir:     workDir,
-		logger:      logger,
-		stderr:      stderr,
-		specialists: make(map[string]*specialistState),
+		meetingID:    meetingID,
+		workDir:      workDir,
+		logger:       logger,
+		stderr:       stderr,
+		allowedNames: allowedNames,
+		specialists:  make(map[string]*specialistState),
 	}
 }
 
-// StartAll spawns all specialist agents in parallel. Returns when all
-// have either started or failed. Errors from individual agents are
-// printed to stderr but do not abort others.
+// StartAll spawns all specialist agents (filtered by allowedNames) in
+// parallel. Returns when all have either started or failed. Errors from
+// individual agents are printed to stderr but do not abort others.
 func (p *SessionPool) StartAll(ctx context.Context) {
-	specs := allSpecialists()
+	specs := filterSpecialists(allSpecialists(), p.allowedNames)
 	var wg sync.WaitGroup
 	for _, spec := range specs {
 		spec := spec
@@ -130,9 +208,10 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef) {
 	}
 
 	// Wire event handler to stream assistant tokens to stderr, tagged.
+	// 🎯T19.4: wrap bare URLs with OSC 8 hyperlinks in text mode output.
 	agent.OnEvent(func(ev claudia.Event) {
 		if ev.Type == "assistant" && ev.Text != "" {
-			fmt.Fprintf(p.stderr, "[%s] %s\n", spec.name, ev.Text)
+			fmt.Fprintf(p.stderr, "[%s] %s\n", spec.name, wrapURLs(ev.Text))
 		}
 	})
 
@@ -212,8 +291,10 @@ func (p *SessionPool) sendToSpecialist(ctx context.Context, name string, st *spe
 	p.logger.LogSpecialistTurn(name, turnIdx, durationMs, 0, 0, 0)
 }
 
-// StopAll cleanly shuts down all running agents, prints per-specialist
-// turn counts to stderr.
+// StopAll cleanly shuts down all running agents except the neutral
+// session, which is kept alive in tmux for post-meeting use (🎯T15).
+// The neutral agent is detached from the pool but its tmux session
+// persists. Turn counts are printed to stderr for all agents.
 func (p *SessionPool) StopAll() {
 	p.mu.Lock()
 	snapshot := make(map[string]*specialistState, len(p.specialists))
@@ -228,14 +309,44 @@ func (p *SessionPool) StopAll() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			st.agent.Stop()
 			st.mu.Lock()
 			turns := st.turnCount
 			st.mu.Unlock()
-			fmt.Fprintf(p.stderr, "[%s] stopped (turns: %d)\n", name, turns)
+
+			if name == "neutral" {
+				// 🎯T15: keep the neutral session alive in tmux.
+				fmt.Fprintf(p.stderr, "[%s] kept alive (turns: %d)\n", name, turns)
+			} else {
+				st.agent.Stop()
+				fmt.Fprintf(p.stderr, "[%s] stopped (turns: %d)\n", name, turns)
+			}
 		}()
 	}
 	wg.Wait()
+}
+
+// NeutralAgent returns the neutral specialist's agent, if started.
+// Returns nil when the neutral specialist is not in the pool (e.g.
+// filtered out via --specialists).
+func (p *SessionPool) NeutralAgent() *claudia.Agent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if st, ok := p.specialists["neutral"]; ok {
+		return st.agent
+	}
+	return nil
+}
+
+// SessionIDs returns a map of specialist name → session ID for all
+// started specialists. Used by 🎯T15 to write session-ids.json.
+func (p *SessionPool) SessionIDs() map[string]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ids := make(map[string]string, len(p.specialists))
+	for name, st := range p.specialists {
+		ids[name] = st.sessionID
+	}
+	return ids
 }
 
 // TurnSummary returns per-specialist turn counts for end-of-meeting

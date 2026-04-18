@@ -25,12 +25,27 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// urlRe matches http/https URLs. Used for OSC 8 hyperlink wrapping (🎯T19.4).
+var urlRe = regexp.MustCompile(`https?://\S+`)
+
+// wrapURLs replaces bare URLs in s with OSC 8 hyperlink escape sequences
+// so terminal emulators that support OSC 8 render them as clickable links.
+// Terminals that do not support OSC 8 display the URL text unchanged.
+//
+// OSC 8 format: \x1b]8;;<URL>\x07<TEXT>\x1b]8;;\x07
+func wrapURLs(s string) string {
+	return urlRe.ReplaceAllStringFunc(s, func(url string) string {
+		return "\x1b]8;;" + url + "\x07" + url + "\x1b]8;;\x07"
+	})
+}
 
 // ---------------------------------------------------------------------------
 // Messages exchanged inside the bubbletea event loop
@@ -299,13 +314,16 @@ func (m tuiModel) renderPane(idx int, w, h int) string {
 		lines = append(lines, styleHistoryLine.Render(truncate(label, innerW)))
 		if p.expanded[i] {
 			for _, wl := range wrapLines(he.text, innerW) {
-				lines = append(lines, truncate(wl, innerW))
+				// 🎯T19.4: wrap bare URLs as OSC 8 hyperlinks.
+				lines = append(lines, truncate(wrapURLs(wl), innerW))
 			}
 		}
 	}
 
 	// Current streaming output, optionally search-highlighted.
+	// 🎯T19.4: wrap bare URLs as OSC 8 hyperlinks before highlighting.
 	for _, cl := range wrapLines(p.current, innerW) {
+		cl = wrapURLs(cl)
 		if p.search != "" {
 			lines = append(lines, highlightSearch(cl, p.search))
 		} else {

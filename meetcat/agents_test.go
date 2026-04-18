@@ -161,3 +161,76 @@ func TestDejargoniserUsesHaiku(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ParseSpecialistNames (🎯T13)
+// ---------------------------------------------------------------------------
+
+func TestParseSpecialistNamesEmpty(t *testing.T) {
+	if ParseSpecialistNames("") != nil {
+		t.Error("expected nil for empty input")
+	}
+	if ParseSpecialistNames("   ") != nil {
+		t.Error("expected nil for whitespace-only input")
+	}
+}
+
+func TestParseSpecialistNamesTwo(t *testing.T) {
+	got := ParseSpecialistNames("skeptic,neutral")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %v", len(got), got)
+	}
+	if !got["skeptic"] || !got["neutral"] {
+		t.Errorf("expected skeptic and neutral; got %v", got)
+	}
+}
+
+func TestParseSpecialistNamesTrimsSpaces(t *testing.T) {
+	got := ParseSpecialistNames(" skeptic , constructive ")
+	if !got["skeptic"] || !got["constructive"] {
+		t.Errorf("expected skeptic and constructive after trimming; got %v", got)
+	}
+}
+
+func TestParseSpecialistNamesLowercases(t *testing.T) {
+	got := ParseSpecialistNames("SKEPTIC")
+	if !got["skeptic"] {
+		t.Errorf("expected lowercase 'skeptic'; got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// filterSpecialists (🎯T13)
+// ---------------------------------------------------------------------------
+
+func TestFilterSpecialistsNilAllowAll(t *testing.T) {
+	defs := allSpecialists()
+	got := filterSpecialists(defs, nil)
+	if len(got) != len(defs) {
+		t.Errorf("nil filter should return all %d specialists, got %d", len(defs), len(got))
+	}
+}
+
+func TestFilterSpecialistsSubset(t *testing.T) {
+	defs := allSpecialists()
+	allow := map[string]bool{"skeptic": true, "neutral": true}
+	got := filterSpecialists(defs, allow)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 specialists, got %d: %v", len(got), got)
+	}
+	names := map[string]bool{}
+	for _, d := range got {
+		names[d.name] = true
+	}
+	if !names["skeptic"] || !names["neutral"] {
+		t.Errorf("expected skeptic and neutral; got %v", names)
+	}
+}
+
+func TestFilterSpecialistsEmptyAllowAll(t *testing.T) {
+	defs := allSpecialists()
+	got := filterSpecialists(defs, map[string]bool{})
+	if len(got) != len(defs) {
+		t.Errorf("empty allow should return all %d specialists, got %d", len(defs), len(got))
+	}
+}
