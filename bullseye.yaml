@@ -203,9 +203,10 @@ targets:
     achieved: 2026-04-18
   T14:
     name: meetcat's contradictions session flags cross-meeting conflicts via mnemo in real time
-    status: identified
+    status: achieved
     value: 13.0
     cost: 5.0
+    actual_cost: 2.0
     acceptance:
     - A dedicated `contradictions` claudia.Agent session runs alongside the T13 specialists
     - Each claim in slide OCR and transcript is surfaced to this session along with a mnemo query for semantically similar prior claims (meeting, slide, timestamp, speaker)
@@ -219,6 +220,7 @@ targets:
     - T12
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T15:
     name: Stopping capture leaves meetcat's neutral session attachable for post-meeting Q&A
     status: achieved
@@ -240,9 +242,10 @@ targets:
     achieved: 2026-04-18
   T16:
     name: meetcat's dejargoniser session expands acronyms using a local Confluence glossary cache
-    status: identified
+    status: achieved
     value: 5.0
     cost: 5.0
+    actual_cost: 3.0
     acceptance:
     - A one-command scrape (`meetcat glossary refresh --confluence-url ...`) builds a local cache of Confluence-defined acronyms and jargon
     - The `dejargoniser` claudia.Agent session (Session mode so it accumulates this meeting's glossary) receives each slide event along with the local cache lookups for acronyms it contains
@@ -255,6 +258,7 @@ targets:
     - T11
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T17:
     name: Weekly meta-pattern digest is produced by a scheduled `claude -p /skill` invocation over the week's artifacts
     status: achieved
