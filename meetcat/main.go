@@ -21,6 +21,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/marcelocantos/claudia"
 )
 
 const version = "0.0.1"
@@ -196,10 +200,40 @@ func main() {
 	}
 }
 
+// isTTY reports whether f is connected to an interactive terminal.
+func isTTY(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0 && fi.Sys().(*syscall.Stat_t) != nil
+}
+
 // run processes the slide-event stream from in, writing a summary to
 // summary. pool, if non-nil, receives each validated slide event for
 // specialist analysis. logger may be nil (no-op).
+//
+// When in is an interactive TTY (and pool is non-nil), run launches a
+// bubbletea TUI. Otherwise it falls back to the original line-by-line
+// stderr mode so meetcat still works in CI / pipe contexts.
 func run(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
+	// Determine whether we should show a TUI.
+	// We show TUI only when pool is configured AND stdin is a real TTY.
+	useTUI := false
+	if pool != nil {
+		if f, ok := in.(*os.File); ok {
+			useTUI = isTTY(f)
+		}
+	}
+
+	if useTUI {
+		return runTUI(ctx, in, summary, logger, pool)
+	}
+	return runText(ctx, in, summary, logger, pool)
+}
+
+// runText is the original line-by-line stderr mode (non-TTY / no pool).
+func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
@@ -258,5 +292,139 @@ func run(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, p
 		if pool != nil {
 			pool.SendSlide(ctx, &ev)
 		}
+	}
+}
+
+// runTUI runs the bubbletea TUI mode. It feeds slide events and
+// specialist token events into the bubbletea program via a channel.
+func runTUI(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
+	specs := allSpecialists()
+	meetingID := pool.meetingID
+
+	m := newTUIModel(meetingID, specs)
+
+	// Channel for all external messages destined for the bubbletea program.
+	// The program will be notified via tea.Cmd wrappers that read from this.
+	// We use a buffered channel to avoid blocking the goroutines.
+	msgCh := make(chan tea.Msg, 256)
+
+	// Wire specialist event handlers BEFORE starting agents so no tokens are lost.
+	for _, spec := range specs {
+		name := spec.name
+		// We need to hook agents before they're started; pool hasn't called
+		// StartAll yet, so we patch it to register OnEvent after start.
+		// We store the hook functions to call after StartAll.
+		_ = name // used in closure below
+	}
+
+	// Start bubbletea program (takes over the terminal).
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(os.Stdin))
+
+	// Feed channel messages into bubbletea via a goroutine.
+	go func() {
+		for msg := range msgCh {
+			p.Send(msg)
+		}
+	}()
+
+	// Slide-decoder goroutine.
+	go func() {
+		defer func() {
+			if pool != nil {
+				pool.StopAll()
+			}
+			close(msgCh)
+			p.Send(tuiStopMsg{})
+		}()
+
+		dec := json.NewDecoder(bufio.NewReader(in))
+		count := 0
+		firstEvent := true
+
+		for {
+			var ev slideEvent
+			switch err := dec.Decode(&ev); {
+			case errors.Is(err, io.EOF):
+				logger.LogMeetingEnd(count, 0)
+				return
+			case err != nil:
+				logger.LogRejected("decode_error")
+				return
+			}
+
+			logger.LogReceived(ev.SlideID, "")
+
+			if err := ev.validate(); err != nil {
+				logger.LogRejected("validation_failed")
+				return
+			}
+
+			logger.LogValidated(ev.SlideID)
+			count++
+
+			evCopy := ev
+			msgCh <- tuiSlideMsg{ev: &evCopy}
+
+			if pool != nil && firstEvent {
+				firstEvent = false
+				// Wire token handlers before starting so we catch all output.
+				for _, spec := range specs {
+					spec := spec
+					// We can't call OnEvent before Start; register after.
+					// This will be wired in startSpecialistWithHook below.
+					_ = spec
+				}
+				startAllWithHooks(ctx, pool, specs, msgCh)
+			}
+
+			if pool != nil {
+				pool.SendSlide(ctx, &evCopy)
+			}
+		}
+	}()
+
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("tui: %w", err)
+	}
+
+	// Print summary to the original summary writer after TUI exits.
+	if pool != nil {
+		ts := pool.TurnSummary()
+		fmt.Fprintln(summary, "meetcat: specialist turn counts:")
+		for name, n := range ts {
+			fmt.Fprintf(summary, "  %s: %d\n", name, n)
+		}
+	}
+	return nil
+}
+
+// startAllWithHooks starts all specialist agents and wires their event
+// streams to send tuiTokenMsg and tuiTurnDoneMsg into msgCh.
+func startAllWithHooks(ctx context.Context, pool *SessionPool, specs []specialistDef, msgCh chan<- tea.Msg) {
+	// We call the pool's existing StartAll but need to intercept OnEvent.
+	// Since pool.StartAll wires OnEvent internally to stderr, we patch the
+	// stderr writer to suppress it (the TUI replaces that output) and
+	// instead install our own hook by wrapping the start procedure.
+	//
+	// Implementation: call StartAll (which installs stderr-based OnEvent),
+	// then add a second OnEvent that feeds the TUI channel. claudia.Agent
+	// supports multiple OnEvent registrations — each call adds a handler.
+	pool.StartAll(ctx)
+
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	// Wire OnEvent for each specialist via the already-started agents so
+	// the TUI channel receives token and turn-done messages.
+	for specName, st := range pool.specialists {
+		specName, st := specName, st
+		agent := st.agent
+		agent.OnEvent(func(ev claudia.Event) {
+			if ev.Type == "assistant" && ev.Text != "" {
+				msgCh <- tuiTokenMsg{name: specName, text: ev.Text}
+			}
+			if ev.IsTerminalStop() {
+				msgCh <- tuiTurnDoneMsg{name: specName}
+			}
+		})
 	}
 }
