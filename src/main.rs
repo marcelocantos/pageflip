@@ -7,6 +7,7 @@ mod dedup;
 mod doctor;
 mod events;
 mod picker;
+pub mod policy;
 mod redact;
 mod session_log;
 

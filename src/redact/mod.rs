@@ -38,6 +38,21 @@ impl RedactPipeline {
     pub fn apply(&self, frame: Frame) -> Result<Frame, RedactError> {
         self.redactors.iter().try_fold(frame, |f, r| r.redact(f))
     }
+
+    /// Apply all redactors and wrap the result in a [`crate::policy::RedactedFrame`].
+    #[allow(dead_code)] // egress paths will require RedactedFrame; wired in T10.4+
+    ///
+    /// This is the **only** way to obtain a `RedactedFrame`.  Egress paths that
+    /// require a `RedactedFrame` parameter will fail to compile if they receive a
+    /// raw [`Frame`] — the type system enforces the redaction boundary at zero
+    /// runtime cost.
+    pub fn apply_and_seal(
+        &self,
+        frame: Frame,
+    ) -> Result<crate::policy::RedactedFrame, RedactError> {
+        let redacted = self.apply(frame)?;
+        Ok(crate::policy::RedactedFrame::new_sealed(redacted))
+    }
 }
 
 impl Default for RedactPipeline {
