@@ -2,12 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod face_blur;
+pub mod ocr;
+pub mod pii;
+pub mod text_redactor;
 
 use std::fmt;
 
 use crate::capture::Frame;
 
-pub use face_blur::FaceBlurRedactor;
+pub use face_blur::{FaceBlurRedactor, PixelRect};
+#[allow(unused_imports)]
+pub use text_redactor::TextPiiRedactor;
 
 /// A redactor that can process a captured frame in-place.
 pub trait Redactor {
@@ -37,21 +42,6 @@ impl RedactPipeline {
     /// error; the partially-redacted frame is discarded.
     pub fn apply(&self, frame: Frame) -> Result<Frame, RedactError> {
         self.redactors.iter().try_fold(frame, |f, r| r.redact(f))
-    }
-
-    /// Apply all redactors and wrap the result in a [`crate::policy::RedactedFrame`].
-    #[allow(dead_code)] // egress paths will require RedactedFrame; wired in T10.4+
-    ///
-    /// This is the **only** way to obtain a `RedactedFrame`.  Egress paths that
-    /// require a `RedactedFrame` parameter will fail to compile if they receive a
-    /// raw [`Frame`] — the type system enforces the redaction boundary at zero
-    /// runtime cost.
-    pub fn apply_and_seal(
-        &self,
-        frame: Frame,
-    ) -> Result<crate::policy::RedactedFrame, RedactError> {
-        let redacted = self.apply(frame)?;
-        Ok(crate::policy::RedactedFrame::new_sealed(redacted))
     }
 }
 

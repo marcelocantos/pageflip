@@ -25,6 +25,7 @@ clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3"
 image_hasher = "3"
 notify = "7.0.0"
+regex = "1"
 screencapturekit = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,12 +35,8 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 winit = "0.30"
 xcap = "0.9"
 
-[dev-dependencies]
-tempfile = "3"
-
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", features = ["std"] }
-objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3.2", features = [
     "NSArray",
     "NSData",
@@ -52,12 +49,18 @@ objc2-core-foundation = { version = "0.3.2", features = [
     "CFCGTypes",
     "objc2",
 ] }
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSRunningApplication",
+    "NSWorkspace",
+] }
 objc2-vision = { version = "0.3.2", features = [
     "VNDetectFaceRectanglesRequest",
     "VNObservation",
+    "VNRecognizeTextRequest",
     "VNRequest",
     "VNRequestHandler",
 ] }
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

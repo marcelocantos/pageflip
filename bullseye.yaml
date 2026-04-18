@@ -161,7 +161,7 @@ targets:
     discovered: 2026-04-14
   T12:
     name: meetcat's neutral session writes a structured meeting artifact folder at meeting stop
-    status: identified
+    status: converging
     value: 8.0
     cost: 5.0
     observable: true
@@ -172,7 +172,7 @@ targets:
     - transcript.jsonl rows are speaker-attributed (T9.3) and slide-aligned (T9.3)
     - Re-running on the same meeting ID does not destroy the prior artifact (append, version, or refuse-and-warn per config)
     - The artifact is mnemo-indexable — meetcat optionally writes a `<meeting>.md` digest into a configured mnemo-indexed directory so future agents can reference this meeting by content search
-    context: 'T12 is now owned by meetcat, not pageflip. The session agent that has been accumulating context all meeting is in the best position to produce the artifact: it has seen every slide in sequence, heard every transcript window, and can distil decisions/actions coherently. Re-uses the existing session context rather than re-analysing from raw artifacts post-hoc.'
+    context: 'ArtifactWriter library (meetcat/artifact.go) is implemented and tested. WriteArtifact sends the structured prompt to the neutral agent, parses the markdown response into sections, and writes decisions.md, actions.md, open-questions.md, contradictions.md, references.json, session-ids.json. Slides are symlinked, transcript is copied. WriteSessionIDs merges specialist IDs post-stop. Remaining gap: wiring into the TUI stop handler (T19.3), mnemo digest output, and re-run idempotency policy.'
     depends_on:
     - T9.3
     - T19.2

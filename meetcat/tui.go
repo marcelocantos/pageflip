@@ -3,22 +3,24 @@
 
 // Package main — bubbletea TUI for meetcat (🎯T19.3).
 //
-// Layout (terminal-width auto-sizing):
+// Layout (terminal-width auto-sizing, 2×2 grid):
 //
-//	┌──────────────────────────────────────────────────────────────┐
-//	│ [skeptic / sonnet]          [constructive / sonnet]          │
-//	│  streaming output …          streaming output …              │
-//	│  ── turn 1 (collapsed) ──   ── turn 1 (collapsed) ──        │
-//	├──────────────────────────────────────────────────────────────┤
-//	│ [neutral / sonnet]          [dejargoniser / haiku]           │
-//	│  streaming output …          streaming output …              │
-//	│  ── turn 1 (collapsed) ──   ── turn 1 (collapsed) ──        │
-//	├──────────────────────────────────────────────────────────────┤
-//	│  slides: 3   elapsed: 0:04   meeting: meetcat-1713298765432  │
-//	└──────────────────────────────────────────────────────────────┘
+//	┌──────────────────────────┐┌──────────────────────────┐
+//	│ [skeptic / sonnet]       ││ [constructive / sonnet]  │
+//	│  streaming output …      ││  streaming output …      │
+//	│  ▸ turn 1 (s1)           ││  ▸ turn 1 (s1)           │
+//	└──────────────────────────┘└──────────────────────────┘
+//	┌──────────────────────────┐┌──────────────────────────┐
+//	│ [neutral / sonnet]       ││ [dejargoniser / haiku]   │
+//	│  streaming output …      ││  streaming output …      │
+//	└──────────────────────────┘└──────────────────────────┘
+//	  slides: 3   elapsed: 0:04   meeting: meetcat-…
 //
-// Keyboard: Tab/Shift-Tab — cycle focus; Enter — expand/collapse history;
-// / — search within focused pane; q — quit.
+// Keyboard:
+//   Tab / Shift-Tab — cycle focus
+//   Enter           — expand/collapse most recent history entry
+//   /               — incremental search within focused pane (Esc to close)
+//   q / Ctrl-C      — quit
 package main
 
 import (
@@ -31,7 +33,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Messages exchanged inside the bubbletea event loop.
+// Messages exchanged inside the bubbletea event loop
 // ---------------------------------------------------------------------------
 
 // tuiSlideMsg is sent when a new slide event arrives.
@@ -57,10 +59,10 @@ type tuiTickMsg time.Time
 type tuiStopMsg struct{}
 
 // ---------------------------------------------------------------------------
-// Pane
+// Pane state
 // ---------------------------------------------------------------------------
 
-// historyEntry is one prior completed turn.
+// historyEntry is one completed prior turn.
 type historyEntry struct {
 	slideID string
 	text    string
@@ -68,12 +70,12 @@ type historyEntry struct {
 
 // pane holds the display state for one specialist.
 type pane struct {
-	name    string
-	model   string
-	current string          // streaming text for the current turn
-	history []historyEntry  // completed prior turns
+	name     string
+	model    string
+	current  string         // streaming text for the current turn
+	history  []historyEntry // completed prior turns
 	expanded map[int]bool   // which history indices are expanded
-	search  string          // search string (/ mode)
+	search   string         // active search query (empty = no search)
 }
 
 func newPane(name, model string) pane {
@@ -84,12 +86,8 @@ func newPane(name, model string) pane {
 	}
 }
 
-// appendToken adds streaming text to the current turn.
-func (p *pane) appendToken(text string) {
-	p.current += text
-}
+func (p *pane) appendToken(text string) { p.current += text }
 
-// commitTurn moves the current text into history.
 func (p *pane) commitTurn(slideID string) {
 	if p.current == "" {
 		return
@@ -98,10 +96,7 @@ func (p *pane) commitTurn(slideID string) {
 	p.current = ""
 }
 
-// toggleHistory expands/collapses turn i.
-func (p *pane) toggleHistory(i int) {
-	p.expanded[i] = !p.expanded[i]
-}
+func (p *pane) toggleHistory(i int) { p.expanded[i] = !p.expanded[i] }
 
 // ---------------------------------------------------------------------------
 // Model
@@ -109,20 +104,19 @@ func (p *pane) toggleHistory(i int) {
 
 // tuiModel is the root bubbletea Model.
 type tuiModel struct {
-	panes      []pane        // ordered: skeptic, constructive, neutral, dejargoniser
-	paneIndex  map[string]int // name → panes index
-	focused    int            // index into panes
+	panes      []pane
+	paneIndex  map[string]int // specialist name → panes index
+	focused    int
 	slideCount int
 	startTime  time.Time
 	meetingID  string
-	slideID    string // current slide
+	slideID    string // most recently seen slide ID
 	width      int
 	height     int
 	searchMode bool
 	quitting   bool
 }
 
-// newTUIModel initialises a fresh model.
 func newTUIModel(meetingID string, specs []specialistDef) tuiModel {
 	panes := make([]pane, len(specs))
 	index := make(map[string]int, len(specs))
@@ -133,7 +127,6 @@ func newTUIModel(meetingID string, specs []specialistDef) tuiModel {
 	return tuiModel{
 		panes:     panes,
 		paneIndex: index,
-		focused:   0,
 		startTime: time.Now(),
 		meetingID: meetingID,
 		width:     80,
@@ -161,7 +154,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
 
 	case tuiTickMsg:
 		return m, tickCmd()
@@ -169,22 +161,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiSlideMsg:
 		m.slideCount++
 		m.slideID = msg.ev.SlideID
-		// Clear current streaming text for all panes on new slide
-		// (turn will be committed via tuiTurnDoneMsg before next slide arrives
-		// in normal flow, but guard here for robustness).
-		return m, nil
 
 	case tuiTokenMsg:
 		if i, ok := m.paneIndex[msg.name]; ok {
 			m.panes[i].appendToken(msg.text)
 		}
-		return m, nil
 
 	case tuiTurnDoneMsg:
 		if i, ok := m.paneIndex[msg.name]; ok {
 			m.panes[i].commitTurn(m.slideID)
 		}
-		return m, nil
 
 	case tuiStopMsg:
 		m.quitting = true
@@ -197,17 +183,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m tuiModel) handleKey(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	if m.searchMode {
 		switch msg.Type {
 		case tea.KeyEsc, tea.KeyEnter:
 			m.searchMode = false
 		case tea.KeyBackspace:
-			if len(m.panes[m.focused].search) > 0 {
-				m.panes[m.focused].search = m.panes[m.focused].search[:len(m.panes[m.focused].search)-1]
+			s := m.panes[m.focused].search
+			if len(s) > 0 {
+				m.panes[m.focused].search = s[:len(s)-1]
 			}
 		default:
-			if msg.Runes != nil {
+			if len(msg.Runes) > 0 {
 				m.panes[m.focused].search += string(msg.Runes)
 			}
 		}
@@ -223,7 +210,6 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.focused = (m.focused - 1 + len(m.panes)) % len(m.panes)
 	case "enter":
-		// Toggle most recent history entry.
 		p := &m.panes[m.focused]
 		if len(p.history) > 0 {
 			p.toggleHistory(len(p.history) - 1)
@@ -240,13 +226,13 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ---------------------------------------------------------------------------
 
 var (
-	styleFocusBorder   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
-	styleNormalBorder  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
-	styleHeader        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
-	styleHistoryLine   = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-	styleSearchPrefix  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	styleStatusBar     = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("252")).Padding(0, 1)
-	styleSearchHighlight = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0"))
+	styleFocusBorder      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
+	styleNormalBorder     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
+	styleHeader           = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	styleHistoryLine      = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	styleSearchPrefix     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	styleStatusBar        = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("252")).Padding(0, 1)
+	styleSearchHighlight  = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0"))
 )
 
 // ---------------------------------------------------------------------------
@@ -258,37 +244,28 @@ func (m tuiModel) View() string {
 		return ""
 	}
 
-	statusBarH := 1
+	const statusBarH = 1
 	availH := m.height - statusBarH
-
-	// 2×2 grid: two columns, two rows.
 	colW := m.width / 2
 	rowH := availH / 2
 
 	topRow := m.renderRow(0, 1, colW, rowH)
 	botRow := m.renderRow(2, 3, colW, rowH)
-	statusBar := m.renderStatusBar()
+	status := m.renderStatusBar()
 
-	return topRow + "\n" + botRow + "\n" + statusBar
+	return topRow + "\n" + botRow + "\n" + status
 }
 
-// renderRow renders a pair of panes side by side.
+// renderRow renders two adjacent panes side by side.
 func (m tuiModel) renderRow(leftIdx, rightIdx, colW, rowH int) string {
 	left := m.renderPane(leftIdx, colW, rowH)
 	right := m.renderPane(rightIdx, colW, rowH)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
-// renderPane renders one specialist pane at the given dimensions.
+// renderPane renders one specialist pane at the given outer dimensions.
 func (m tuiModel) renderPane(idx int, w, h int) string {
-	if idx >= len(m.panes) {
-		return lipgloss.NewStyle().Width(w).Height(h).Render("")
-	}
-
-	p := m.panes[idx]
-	focused := idx == m.focused
-
-	// Inner width/height accounting for border (1 each side).
+	// Border takes 1 cell on each side.
 	innerW := w - 2
 	innerH := h - 2
 	if innerW < 4 {
@@ -298,46 +275,50 @@ func (m tuiModel) renderPane(idx int, w, h int) string {
 		innerH = 2
 	}
 
+	if idx >= len(m.panes) {
+		empty := lipgloss.NewStyle().Width(innerW).Height(innerH).Render("")
+		return styleNormalBorder.Width(innerW).Height(innerH).Render(empty)
+	}
+
+	p := m.panes[idx]
+	focused := idx == m.focused
+
 	var lines []string
 
-	// Header line.
+	// Header.
 	header := styleHeader.Render(fmt.Sprintf("[%s / %s]", p.name, p.model))
 	lines = append(lines, truncate(header, innerW))
 
-	// History entries (collapsed by default, expand on Enter).
-	for i, h := range p.history {
+	// History entries (collapsed by default; Enter expands the most recent).
+	for i, he := range p.history {
 		indicator := "▸"
 		if p.expanded[i] {
 			indicator = "▾"
 		}
-		label := fmt.Sprintf("%s turn %d (%s)", indicator, i+1, h.slideID)
+		label := fmt.Sprintf("%s turn %d (%s)", indicator, i+1, he.slideID)
 		lines = append(lines, styleHistoryLine.Render(truncate(label, innerW)))
 		if p.expanded[i] {
-			for _, hl := range wrapLines(h.text, innerW) {
-				lines = append(lines, truncate(hl, innerW))
+			for _, wl := range wrapLines(he.text, innerW) {
+				lines = append(lines, truncate(wl, innerW))
 			}
 		}
 	}
 
-	// Current streaming output — search-highlighted if search is active.
-	currentLines := wrapLines(p.current, innerW)
-	if p.search != "" {
-		for _, cl := range currentLines {
-			lines = append(lines, highlightSearch(cl, p.search, innerW))
-		}
-	} else {
-		for _, cl := range currentLines {
+	// Current streaming output, optionally search-highlighted.
+	for _, cl := range wrapLines(p.current, innerW) {
+		if p.search != "" {
+			lines = append(lines, highlightSearch(cl, p.search))
+		} else {
 			lines = append(lines, cl)
 		}
 	}
 
-	// Search prompt at the bottom of the pane.
+	// Search prompt at the bottom when focused.
 	if m.searchMode && focused {
-		prompt := styleSearchPrefix.Render("/") + p.search
-		lines = append(lines, prompt)
+		lines = append(lines, styleSearchPrefix.Render("/")+p.search)
 	}
 
-	// Pad / truncate to innerH lines.
+	// Pad to innerH; keep last innerH lines when content overflows.
 	for len(lines) < innerH {
 		lines = append(lines, "")
 	}
@@ -347,11 +328,11 @@ func (m tuiModel) renderPane(idx int, w, h int) string {
 
 	body := lipgloss.NewStyle().Width(innerW).Height(innerH).Render(strings.Join(lines, "\n"))
 
-	style := styleNormalBorder.Width(w - 2).Height(h - 2)
+	border := styleNormalBorder
 	if focused {
-		style = styleFocusBorder.Width(w - 2).Height(h - 2)
+		border = styleFocusBorder
 	}
-	return style.Render(body)
+	return border.Width(innerW).Height(innerH).Render(body)
 }
 
 // renderStatusBar renders the bottom status line.
@@ -359,19 +340,17 @@ func (m tuiModel) renderStatusBar() string {
 	elapsed := time.Since(m.startTime).Round(time.Second)
 	mins := int(elapsed.Minutes())
 	secs := int(elapsed.Seconds()) % 60
-	text := fmt.Sprintf("  slides: %d   elapsed: %d:%02d   meeting: %s  ", m.slideCount, mins, secs, m.meetingID)
-	return styleStatusBar.Width(m.width).Render(text)
+	return styleStatusBar.Width(m.width).Render(
+		fmt.Sprintf("slides: %d   elapsed: %d:%02d   meeting: %s", m.slideCount, mins, secs, m.meetingID),
+	)
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Text helpers
 // ---------------------------------------------------------------------------
 
-// truncate trims s to at most n visible bytes (ASCII-safe; good enough for
-// log-style output).
+// truncate trims s to at most n runes, appending "…" if trimmed.
 func truncate(s string, n int) string {
-	// Strip ANSI codes for length calculation is complex; use rune count as
-	// approximation since lipgloss handles the actual rendering.
 	runes := []rune(s)
 	if len(runes) <= n {
 		return s
@@ -379,7 +358,7 @@ func truncate(s string, n int) string {
 	return string(runes[:n-1]) + "…"
 }
 
-// wrapLines wraps s to lines of at most w runes each.
+// wrapLines hard-wraps s into lines of at most w runes each.
 func wrapLines(s string, w int) []string {
 	if w <= 0 {
 		return []string{s}
@@ -396,8 +375,9 @@ func wrapLines(s string, w int) []string {
 	return out
 }
 
-// highlightSearch returns line with occurrences of query highlighted.
-func highlightSearch(line, query string, _ int) string {
+// highlightSearch returns line with all case-insensitive occurrences of
+// query wrapped in the search highlight style.
+func highlightSearch(line, query string) string {
 	if query == "" {
 		return line
 	}

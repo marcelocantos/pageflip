@@ -152,7 +152,7 @@ pub fn frontmost_app_bundle_id() -> Option<String> {
     let app: Option<objc2::rc::Retained<NSRunningApplication>> = workspace.frontmostApplication();
     let app = app?;
     let bundle_id: Option<objc2::rc::Retained<NSString>> = app.bundleIdentifier();
-    bundle_id.map(|s| s.to_string())
+    bundle_id.map(|s: objc2::rc::Retained<NSString>| s.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]

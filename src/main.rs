@@ -28,7 +28,8 @@ use session_log::{LogEvent, SessionLog};
 use audio::{AudioCaptureHandle, NullTranscriber, Transcriber};
 use capture::{default_backend, Capture, CropSpec, Region, WindowSpec};
 use dedup::Dedup;
-use redact::{FaceBlurRedactor, RedactPipeline, Redactor};
+use policy::ParanoidSaver;
+use redact::{FaceBlurRedactor, RedactPipeline};
 
 enum Target {
     Region(Region),
@@ -120,10 +121,20 @@ struct Cli {
     #[arg(long)]
     redact_faces: bool,
 
+    /// Mask PII (emails, phone numbers, credit cards, government IDs, IPs)
+    /// detected via OCR in every saved frame.
+    #[arg(long)]
+    redact_pii: bool,
+
+    /// Save unredacted frames to DIR before redaction is applied. The
+    /// redacted versions go to --output as normal; the raw originals stay
+    /// local in this directory.
+    #[arg(long, value_name = "DIR")]
+    paranoid: Option<PathBuf>,
+
     /// Capture system audio alongside frames and feed it through a local
     /// Transcriber. Raw audio never leaves the audio module — only derived
-    /// transcript segments are surfaced. Current default transcriber is
-    /// `null` (discards samples); Whisper/WhisperX lands in T9.2.
+    /// transcript segments are surfaced.
     #[arg(long)]
     audio: bool,
 
@@ -135,6 +146,11 @@ struct Cli {
     /// passed to the Python subprocess. Defaults to `large-v3`.
     #[arg(long, value_name = "MODEL")]
     whisperx_model: Option<String>,
+
+    /// Enable speaker diarisation when --transcriber whisperx is set.
+    /// Adds speaker_id to each transcript segment via pyannote.
+    #[arg(long)]
+    diarize: bool,
 
     /// Emit one structured JSON object per saved slide (NDJSON).
     /// SPEC can be `stdout`, `fd:<N>`, or a file path.
@@ -256,6 +272,10 @@ fn run(cli: &Cli) -> Result<(), String> {
 
     let mut dedup = Dedup::new(cli.threshold);
     let redact = build_redact_pipeline(cli);
+    let paranoid = cli
+        .paranoid
+        .as_ref()
+        .map(|dir| ParanoidSaver::new(dir.clone()));
 
     let mut sink = cli
         .events_out
@@ -284,6 +304,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             &cli.transcriber,
             &output_dir,
             cli.whisperx_model.clone(),
+            cli.diarize,
         )?)
     } else {
         None
@@ -318,6 +339,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             &target,
             &mut dedup,
             &redact,
+            paranoid.as_ref(),
             &output_dir,
             sink.as_mut(),
             slog.as_mut(),
@@ -379,11 +401,16 @@ fn start_audio_capture(
     kind: &str,
     output_dir: &Path,
     whisperx_model: Option<String>,
+    diarize: bool,
 ) -> Result<AudioCaptureHandle, String> {
     let transcriber: Box<dyn Transcriber> = match kind {
         "null" => Box::new(NullTranscriber::default()),
-        "whisperx" => audio::whisperx_transcriber(output_dir.to_path_buf(), whisperx_model)
-            .map_err(|e| e.to_string())?,
+        "whisperx" => if diarize {
+            audio::whisperx_transcriber_with_diarize(output_dir.to_path_buf(), whisperx_model, true)
+        } else {
+            audio::whisperx_transcriber(output_dir.to_path_buf(), whisperx_model)
+        }
+        .map_err(|e| e.to_string())?,
         other => {
             return Err(format!(
                 "--transcriber {other:?} not supported; options: `null`, `whisperx`"
@@ -480,6 +507,7 @@ fn capture_once(
     target: &Target,
     dedup: &mut Dedup,
     redact: &Option<RedactPipeline>,
+    paranoid: Option<&ParanoidSaver>,
     output_dir: &Path,
     sink: Option<&mut EventSink>,
     slog: Option<&mut SessionLog>,
@@ -507,11 +535,19 @@ fn capture_once(
         return Ok(SaveResult::Deduped);
     }
 
+    let slug = timestamp_slug();
+
+    // Paranoid mode: save the unredacted frame before redaction is applied.
+    if let Some(saver) = paranoid {
+        saver
+            .save_raw(&frame, &slug)
+            .map_err(|e| format!("paranoid save: {e}"))?;
+    }
+
     let frame = match redact {
         Some(pipeline) => pipeline.apply(frame).map_err(|e| e.to_string())?,
         None => frame,
     };
-    let slug = timestamp_slug();
     let filename = format!("{slug}.png");
     let path = output_dir.join(&filename);
     frame.save_png(&path).map_err(|e| e.to_string())?;
@@ -568,12 +604,16 @@ fn unix_ms() -> u64 {
 }
 
 fn build_redact_pipeline(cli: &Cli) -> Option<RedactPipeline> {
-    if !cli.redact_faces {
+    if !cli.redact_faces && !cli.redact_pii {
         return None;
     }
     let mut pipeline = RedactPipeline::new();
-    let face: Box<dyn Redactor> = Box::new(FaceBlurRedactor::default());
-    pipeline.push(face);
+    if cli.redact_faces {
+        pipeline.push(Box::new(FaceBlurRedactor::default()));
+    }
+    if cli.redact_pii {
+        pipeline.push(Box::new(redact::TextPiiRedactor));
+    }
     Some(pipeline)
 }
 
