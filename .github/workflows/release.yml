@@ -4,15 +4,13 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   # ── Job 1: gate ──────────────────────────────────────────────────────────────
-  # Run the full bullseye invariant suite (fmt + clippy + build + test) before
-  # any binaries are published.  Uses macos-14 (Apple Silicon) because xcap and
-  # the screen-capture dependencies are macOS-only for now.
   test:
     name: Bullseye gate
     runs-on: macos-14
@@ -35,46 +33,17 @@ jobs:
       - name: Run bullseye invariants
         run: make bullseye
 
-  # ── Job 2: build matrix ───────────────────────────────────────────────────────
-  # Primary platforms: macOS arm64, Linux x86_64, Linux arm64.
-  # Secondary platforms (Windows x86_64, Windows arm64): skipped for now.
-  #   TODO(T6): add x86_64-pc-windows-msvc and aarch64-pc-windows-msvc once the
-  #   Windows screen-capture backend lands.  Cross-compiling the windows-capture /
-  #   winit stack from Linux/macOS requires significant cross-compile setup that
-  #   isn't worth investing in until the Windows backend itself is implemented.
+  # ── Job 2: build ─────────────────────────────────────────────────────────────
+  # macOS arm64 only — the project is macOS-only (T6/T7 deleted).
   build:
-    name: Build ${{ matrix.target }}
+    name: Build macOS arm64
     needs: test
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-14
-            os_label: darwin
-            arch_label: arm64
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            os_label: linux
-            arch_label: amd64
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            os_label: linux
-            arch_label: arm64
-            cross: true
-
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cross (Linux arm64)
-        if: matrix.cross == true
-        run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -82,36 +51,28 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build release binaries
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+        run: cargo build --release
 
-      - name: Package tarballs
+      - name: Package tarball
         run: |
-          version="${GITHUB_REF#refs/tags/v}"
-          bin_dir="target/${{ matrix.target }}/release"
-          tarball="pageflip-${version}-${{ matrix.os_label }}-${{ matrix.arch_label }}.tar.gz"
+          version="${GITHUB_REF_NAME#v}"
+          tarball="pageflip-${version}-darwin-arm64.tar.gz"
           tar czf "$tarball" \
-            -C "$bin_dir" pageflip pageflip-feed
+            -C target/release pageflip pageflip-feed
           echo "TARBALL=$tarball" >> "$GITHUB_ENV"
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pageflip-${{ matrix.os_label }}-${{ matrix.arch_label }}
+          name: pageflip-darwin-arm64
           path: ${{ env.TARBALL }}
           retention-days: 1
 
-  # ── Job 3: GitHub Release ─────────────────────────────────────────────────────
-  # Collects all tarballs, creates the GitHub Release, and updates the Homebrew
-  # formula in the marcelocantos/homebrew-tap tap.
+  # ── Job 3: GitHub Release + Homebrew ─────────────────────────────────────────
   release:
     name: Publish release
     needs: build
@@ -119,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all tarballs
+      - name: Download tarball
         uses: actions/download-artifact@v4
         with:
           path: dist
@@ -128,11 +89,10 @@ jobs:
       - name: List dist artifacts
         run: ls -lh dist/
 
-      - name: Create GitHub Release
+      - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tar.gz
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -151,6 +111,6 @@ jobs:
           version: ${{ github.ref_name }}
           target_darwin_amd64: false
           target_darwin_arm64: true
-          target_linux_amd64: true
-          target_linux_arm64: true
+          target_linux_amd64: false
+          target_linux_arm64: false
           skip_checksum: true
