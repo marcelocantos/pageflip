@@ -1,14 +1,21 @@
 # Copyright 2026 Marcelo Cantos
 # SPDX-License-Identifier: Apache-2.0
-"""Transcribe raw PCM f32 audio from stdin using faster-whisper.
+"""Transcribe (and optionally diarise) raw PCM f32 audio from stdin.
 
 Usage (invoked by WhisperxTranscriber via uv):
-  uv run --with faster-whisper --with scipy python scripts/transcribe.py \
-      --sample-rate 48000 --channels 2 [--model large-v3]
+  uv run --with faster-whisper --with scipy \\
+         --with pyannote.audio --with torch --with torchaudio \\
+         python scripts/transcribe.py \\
+         --sample-rate 48000 --channels 2 [--model large-v3] [--diarize]
 
 Reads interleaved f32-LE samples from stdin.
-Writes NDJSON segments to stdout: {"start_ms": N, "end_ms": N, "text": "..."}.
+Writes NDJSON segments to stdout:
+  {"start_ms": N, "end_ms": N, "text": "..."}                 (without --diarize)
+  {"start_ms": N, "end_ms": N, "text": "...", "speaker_id": "SPEAKER_00"}  (with)
+
 Never writes audio to disk. HF_HUB_OFFLINE=1 is expected to be set by caller.
+When --diarize is used, HF_TOKEN must be set (or the token cached via `huggingface-cli login`)
+so that pyannote's gated model can be loaded from the local cache.
 """
 
 import argparse
@@ -27,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         "--model",
         default="large-v3",
         help="faster-whisper model name or path (default: large-v3)",
+    )
+    p.add_argument(
+        "--diarize",
+        action="store_true",
+        default=False,
+        help="Run pyannote speaker diarisation and add speaker_id to each segment",
     )
     return p.parse_args()
 
@@ -62,17 +75,81 @@ def resample_to_16k(audio: np.ndarray, orig_rate: int) -> np.ndarray:
     return resampled.astype(np.float32)
 
 
-def transcribe(audio: np.ndarray, model_name: str) -> None:
-    """Run faster-whisper on mono 16 kHz audio and emit NDJSON to stdout."""
-    from faster_whisper import WhisperModel
+def transcribe(audio: np.ndarray, model_name: str, diarize: bool) -> None:
+    """Run faster-whisper (and optionally pyannote) on mono 16 kHz audio and emit NDJSON.
 
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    segments, _info = model.transcribe(audio, beam_size=5)
-    for seg in segments:
+    When diarize=False the output schema is:
+      {"start_ms": N, "end_ms": N, "text": "..."}
+
+    When diarize=True the output schema is:
+      {"start_ms": N, "end_ms": N, "text": "...", "speaker_id": "SPEAKER_00"}
+
+    All processing is done in-memory. No audio or intermediate data is written to disk.
+    """
+    import whisperx
+
+    # ------------------------------------------------------------------ #
+    # 1. Transcription (word-level timestamps)                            #
+    # ------------------------------------------------------------------ #
+    # whisperx wraps faster-whisper and adds forced-alignment for word
+    # timestamps. We use the same mono 16 kHz array throughout.
+    device = "cpu"
+    compute_type = "int8"
+
+    model = whisperx.load_model(model_name, device=device, compute_type=compute_type)
+    result = model.transcribe(audio, batch_size=16)
+
+    # Alignment produces word-level timestamps in result["segments"].
+    model_a, metadata = whisperx.load_align_model(
+        language_code=result["language"], device=device
+    )
+    result = whisperx.align(
+        result["segments"], model_a, metadata, audio, device, return_char_alignments=False
+    )
+
+    if not diarize:
+        for seg in result["segments"]:
+            record = {
+                "start_ms": int(seg["start"] * 1000),
+                "end_ms": int(seg["end"] * 1000),
+                "text": seg["text"].strip(),
+            }
+            sys.stdout.write(json.dumps(record) + "\n")
+            sys.stdout.flush()
+        return
+
+    # ------------------------------------------------------------------ #
+    # 2. Diarisation (pyannote — entirely in-memory)                      #
+    # ------------------------------------------------------------------ #
+    # pyannote.audio's Pipeline.from_pretrained accepts a waveform dict
+    # with 'waveform' (torch.Tensor, shape [channels, samples]) and
+    # 'sample_rate'. We pass the 16 kHz mono numpy array converted to a
+    # 2-D torch tensor so no temp file is ever created.
+    import torch
+    from pyannote.audio import Pipeline
+
+    hf_token = os.environ.get("HF_TOKEN") or True  # True = use cached token
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        use_auth_token=hf_token,
+    )
+
+    # Build the in-memory audio dict pyannote expects.
+    waveform_tensor = torch.from_numpy(audio[np.newaxis, :])  # shape: [1, samples]
+    audio_dict = {"waveform": waveform_tensor, "sample_rate": 16_000}
+    diarization = pipeline(audio_dict)
+
+    # ------------------------------------------------------------------ #
+    # 3. Merge — assign speaker IDs to whisperx segments                 #
+    # ------------------------------------------------------------------ #
+    result = whisperx.assign_word_speakers(diarization, result)
+
+    for seg in result["segments"]:
         record = {
-            "start_ms": int(seg.start * 1000),
-            "end_ms": int(seg.end * 1000),
-            "text": seg.text.strip(),
+            "start_ms": int(seg["start"] * 1000),
+            "end_ms": int(seg["end"] * 1000),
+            "text": seg["text"].strip(),
+            "speaker_id": seg.get("speaker", "SPEAKER_UNKNOWN"),
         }
         sys.stdout.write(json.dumps(record) + "\n")
         sys.stdout.flush()
@@ -83,7 +160,7 @@ def main() -> None:
     try:
         audio = read_pcm_mono(args.sample_rate, args.channels)
         audio = resample_to_16k(audio, args.sample_rate)
-        transcribe(audio, args.model)
+        transcribe(audio, args.model, args.diarize)
     except Exception as exc:
         print(f"transcribe.py error: {exc}", file=sys.stderr)
         sys.exit(1)

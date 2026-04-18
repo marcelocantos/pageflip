@@ -29,7 +29,7 @@
 #![allow(dead_code)]
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
@@ -44,6 +44,10 @@ pub struct Segment {
     pub end_ms: u64,
     pub text: String,
     pub speaker_id: Option<String>,
+    /// Slide identifier derived from the PNG filename whose timestamp is ≤
+    /// `start_ms` and closest to it.  Populated by
+    /// [`align_segments_to_slides`]; `None` until that function runs.
+    pub slide_id: Option<String>,
 }
 
 /// An opaque batch of PCM audio samples passed from the capture backend
@@ -217,13 +221,48 @@ pub fn start_capture(_transcriber: Box<dyn Transcriber>) -> Result<AudioCaptureH
 ///
 /// `output_dir` is where `transcript.jsonl` will be written after `finalise`.
 /// `model` overrides the default model name (`large-v3`).
+///
+/// Diarisation is disabled. Use [`whisperx_transcriber_with_diarize`] to
+/// enable pyannote speaker diarisation.
 pub fn whisperx_transcriber(
     output_dir: PathBuf,
     model: Option<String>,
 ) -> Result<Box<dyn Transcriber>, TranscribeError> {
     Ok(Box::new(whisperx::WhisperxTranscriber::new(
-        output_dir, model,
+        output_dir, model, false,
     )))
+}
+
+/// Build a [`whisperx::WhisperxTranscriber`] with optional speaker diarisation.
+///
+/// When `diarize` is `true` the subprocess receives `--diarize`, which
+/// activates pyannote/speaker-diarization-3.1 inside the Python process.
+/// This requires `pyannote.audio`, `torch`, and `torchaudio` in the uv
+/// environment, plus a HuggingFace auth token either set as `$HF_TOKEN` or
+/// cached via `huggingface-cli login`.
+pub fn whisperx_transcriber_with_diarize(
+    output_dir: PathBuf,
+    model: Option<String>,
+    diarize: bool,
+) -> Result<Box<dyn Transcriber>, TranscribeError> {
+    Ok(Box::new(whisperx::WhisperxTranscriber::new(
+        output_dir, model, diarize,
+    )))
+}
+
+/// Join transcript segments to slides by matching each segment's `start_ms`
+/// against the timestamps embedded in PNG filenames in `output_dir`.
+///
+/// PNG filenames must follow the pattern `<ISO8601-basic>Z.png`, e.g.
+/// `20260415T130050Z.png`.  The timestamp is interpreted as milliseconds
+/// since the Unix epoch (UTC).  Each segment receives the `slide_id` of
+/// the slide whose timestamp is ≤ `segment.start_ms` and closest to it.
+/// Segments that precede all slides are left with `slide_id = None`.
+///
+/// This function performs a pure data-join in Rust after the audio
+/// subprocess has returned — no audio is involved.
+pub fn align_segments_to_slides(segments: &mut [Segment], output_dir: &Path) {
+    whisperx::align_segments_to_slides(segments, output_dir);
 }
 
 #[cfg(test)]
@@ -254,8 +293,10 @@ mod tests {
             end_ms: 250,
             text: "hello".to_string(),
             speaker_id: None,
+            slide_id: None,
         };
         assert!(s.speaker_id.is_none());
+        assert!(s.slide_id.is_none());
         let s2 = Segment {
             speaker_id: Some("speaker_0".to_string()),
             ..s.clone()
