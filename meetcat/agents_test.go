@@ -132,10 +132,11 @@ func TestSpecialistSessionIDFormat(t *testing.T) {
 func TestAllSpecialistsNames(t *testing.T) {
 	specs := allSpecialists()
 	want := map[string]bool{
-		"skeptic":       true,
-		"constructive":  true,
-		"neutral":       true,
-		"dejargoniser":  true,
+		"skeptic":        true,
+		"constructive":   true,
+		"neutral":        true,
+		"dejargoniser":   true,
+		"contradictions": true,
 	}
 	for _, s := range specs {
 		if !want[s.name] {
@@ -158,6 +159,14 @@ func TestDejargoniserUsesHaiku(t *testing.T) {
 	for _, s := range allSpecialists() {
 		if s.name == "dejargoniser" && s.model != "haiku" {
 			t.Errorf("dejargoniser should use haiku model, got %q", s.model)
+		}
+	}
+}
+
+func TestContradictionsUsesOpus(t *testing.T) {
+	for _, s := range allSpecialists() {
+		if s.name == "contradictions" && s.model != "opus" {
+			t.Errorf("contradictions should use opus model, got %q", s.model)
 		}
 	}
 }

@@ -262,13 +262,25 @@ func (m tuiModel) View() string {
 	const statusBarH = 1
 	availH := m.height - statusBarH
 	colW := m.width / 2
-	rowH := availH / 2
 
-	topRow := m.renderRow(0, 1, colW, rowH)
-	botRow := m.renderRow(2, 3, colW, rowH)
+	// Compute number of 2-column rows needed to display all panes.
+	nPanes := len(m.panes)
+	nRows := (nPanes + 1) / 2 // ceiling division; at least 1 row
+	if nRows < 1 {
+		nRows = 1
+	}
+	rowH := availH / nRows
+	if rowH < 3 {
+		rowH = 3
+	}
+
+	var rows []string
+	for r := 0; r < nRows; r++ {
+		rows = append(rows, m.renderRow(r*2, r*2+1, colW, rowH))
+	}
 	status := m.renderStatusBar()
 
-	return topRow + "\n" + botRow + "\n" + status
+	return strings.Join(rows, "\n") + "\n" + status
 }
 
 // renderRow renders two adjacent panes side by side.
