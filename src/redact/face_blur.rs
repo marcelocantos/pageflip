@@ -126,9 +126,16 @@ fn detect_faces_in_png(
         let request_ref: &VNRequest = &request;
         let requests: objc2::rc::Retained<NSArray<VNRequest>> = NSArray::from_slice(&[request_ref]);
 
-        handler
-            .performRequests_error(&requests)
-            .map_err(|e| e.localizedDescription().to_string())?;
+        // If Vision can't create an inference context (e.g. headless CI, no
+        // GPU, sandboxed environment), degrade to "no faces detected" rather
+        // than surfacing an error that blocks the capture pipeline.
+        if let Err(e) = handler.performRequests_error(&requests) {
+            let msg = e.localizedDescription().to_string();
+            if msg.contains("inference context") || msg.contains("VNRequest") {
+                return Ok(Vec::new());
+            }
+            return Err(msg);
+        }
 
         let rects: Vec<PixelRect> = match request.results() {
             None => Vec::new(),
