@@ -89,8 +89,11 @@ func writeAuthState(w io.Writer) {
 func writeActiveSubprocesses(w io.Writer) {
 	fmt.Fprintln(w, "## Active subprocesses")
 	fmt.Fprintln(w)
-	// T19.2 claudia session-mode agents not yet implemented.
-	fmt.Fprintln(w, "- (no active sessions — T19.2 not yet implemented)")
+	// Active agents are only available while meetcat is running with
+	// --agents. The doctor subcommand runs standalone, so it cannot
+	// enumerate live sessions here. Use `meetcat attach` to inspect
+	// a running specialist session.
+	fmt.Fprintln(w, "- (doctor cannot enumerate live agents; run `meetcat attach` while meetcat is active)")
 	fmt.Fprintln(w)
 }
 

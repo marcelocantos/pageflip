@@ -1,0 +1,4 @@
+github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/marcelocantos/claudia v0.6.0 h1:LKyBrv+bCn8OI9Dq9n0PVKqm/EBS3gYLckZoyWhqc98=
+github.com/marcelocantos/claudia v0.6.0/go.mod h1:gnEo8eb10hpDn8hno9OWeekLqvVTk/NbtPXdPb15Dug=

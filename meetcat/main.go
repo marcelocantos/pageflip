@@ -6,13 +6,15 @@
 // This is the 🎯T19.1 walking skeleton extended with:
 //   - 🎯T21: doctor subcommand for diagnostic output
 //   - 🎯T21: --log-file for structured NDJSON session logging
+//   - 🎯T19.2: claudia session-mode specialist agents
 //
-// Subsequent sub-targets (T19.2 session-mode claudia agents, T19.3 TUI,
-// T19.4 OSC 8 hyperlinks) build on this shell.
+// Subsequent sub-targets (T19.3 TUI, T19.4 OSC 8 hyperlinks) build
+// on this shell.
 package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -106,21 +108,56 @@ func (e *slideEvent) validate() error {
 
 func main() {
 	// Subcommand dispatch: check os.Args[1] before flag.Parse.
-	if len(os.Args) >= 2 && os.Args[1] == "doctor" {
-		doctorFlags := flag.NewFlagSet("doctor", flag.ExitOnError)
-		logFile := doctorFlags.String("log-file", "", "Path to NDJSON session log to tail.")
-		if err := doctorFlags.Parse(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "meetcat doctor:", err)
-			os.Exit(2)
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "doctor":
+			doctorFlags := flag.NewFlagSet("doctor", flag.ExitOnError)
+			logFile := doctorFlags.String("log-file", "", "Path to NDJSON session log to tail.")
+			if err := doctorFlags.Parse(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "meetcat doctor:", err)
+				os.Exit(2)
+			}
+			runDoctor(os.Stdout, *logFile)
+			return
+		case "attach":
+			attachFlags := flag.NewFlagSet("attach", flag.ExitOnError)
+			meetingID := attachFlags.String("meeting", "", "Meeting session ID (meetcat-<timestamp>).")
+			if err := attachFlags.Parse(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "meetcat attach:", err)
+				os.Exit(2)
+			}
+			args := attachFlags.Args()
+			if len(args) != 1 {
+				fmt.Fprintln(os.Stderr, "usage: meetcat attach [--meeting <id>] <specialist>")
+				os.Exit(2)
+			}
+			specialist := args[0]
+			if *meetingID == "" {
+				fmt.Fprintln(os.Stderr, "meetcat attach: --meeting <id> is required")
+				os.Exit(2)
+			}
+			sessID := specialistSessionID(*meetingID, specialist)
+			// Print the tmux attach command. The actual tmux socket
+			// path follows claudia's convention (see agents-guide.md:
+			// "tmux substrate" section). We delegate to agent.AttachCommand()
+			// by constructing a minimal pool lookup; since we have no
+			// running agent here, derive the command manually.
+			// claudia uses: tmux -S <sock> attach -t @<window>
+			// We can't know the window ID without a live agent, so we
+			// emit a best-effort hint using the session ID.
+			fmt.Printf("# Attach to specialist %q (session: %s)\n", specialist, sessID)
+			fmt.Printf("# Start meetcat, then run:\n")
+			fmt.Printf("tmux -L claudia attach-session -t %s\n", sessID)
+			return
 		}
-		runDoctor(os.Stdout, *logFile)
-		return
 	}
 
 	showVersion := flag.Bool("version", false, "Print version and exit.")
 	showHelp := flag.Bool("help", false, "Print help and exit.")
 	showHelpAgent := flag.Bool("help-agent", false, "Print machine-readable help and exit.")
 	logFile := flag.String("log-file", "", "Path to write NDJSON session log (append, created if absent).")
+	enableAgents := flag.Bool("agents", false, "Spawn claudia specialist sessions for each slide.")
+	workDir := flag.String("work-dir", ".", "Working directory passed to claudia agents.")
 	flag.Parse()
 
 	switch {
@@ -147,16 +184,38 @@ func main() {
 		defer f.Close()
 	}
 
-	if err := run(os.Stdin, os.Stderr, logger); err != nil {
+	var pool *SessionPool
+	if *enableAgents {
+		meetingID := MeetingSessionID()
+		pool = NewSessionPool(meetingID, *workDir, os.Stderr, logger)
+	}
+
+	if err := run(context.Background(), os.Stdin, os.Stderr, logger, pool); err != nil {
 		fmt.Fprintln(os.Stderr, "meetcat:", err)
 		os.Exit(1)
 	}
 }
 
-func run(in io.Reader, summary io.Writer, logger *Logger) error {
+// run processes the slide-event stream from in, writing a summary to
+// summary. pool, if non-nil, receives each validated slide event for
+// specialist analysis. logger may be nil (no-op).
+func run(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
+	firstEvent := true
+
+	if pool != nil {
+		defer func() {
+			pool.StopAll()
+			ts := pool.TurnSummary()
+			fmt.Fprintln(summary, "meetcat: specialist turn counts:")
+			for name, n := range ts {
+				fmt.Fprintf(summary, "  %s: %d\n", name, n)
+			}
+		}()
+	}
+
 	for {
 		var ev slideEvent
 		switch err := dec.Decode(&ev); {
@@ -179,6 +238,12 @@ func run(in io.Reader, summary io.Writer, logger *Logger) error {
 		logger.LogValidated(ev.SlideID)
 		count++
 
+		// On first slide, spawn agents (if pool configured).
+		if pool != nil && firstEvent {
+			firstEvent = false
+			pool.StartAll(ctx)
+		}
+
 		front := ev.FrontmostApp
 		if front == "" {
 			front = "-"
@@ -188,5 +253,10 @@ func run(in io.Reader, summary io.Writer, logger *Logger) error {
 			"[%d] %s (t=%dms, dur=%dms, app=%s) %s\n",
 			count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
 		)
+
+		// Send slide to all specialist agents in parallel.
+		if pool != nil {
+			pool.SendSlide(ctx, &ev)
+		}
 	}
 }

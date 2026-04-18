@@ -86,13 +86,17 @@ func TestDoctorWithMissingLogFile(t *testing.T) {
 	}
 }
 
-func TestDoctorActiveSubprocessesPlaceholder(t *testing.T) {
+func TestDoctorActiveSubprocessesSection(t *testing.T) {
 	var buf bytes.Buffer
 	runDoctor(&buf, "")
 	out := buf.String()
 
-	// T19.2 not built yet; doctor should say so.
-	if !strings.Contains(out, "T19.2") {
-		t.Errorf("Active subprocesses section should mention T19.2; got:\n%s", out)
+	// T19.2 is implemented; the section should describe the attach
+	// subcommand for inspecting live sessions.
+	if !strings.Contains(out, "## Active subprocesses") {
+		t.Errorf("Active subprocesses section missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "attach") {
+		t.Errorf("Active subprocesses section should mention 'attach'; got:\n%s", out)
 	}
 }
