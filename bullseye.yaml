@@ -328,10 +328,11 @@ targets:
     achieved: 2026-04-18
   T19.3:
     name: meetcat presents a TUI with an auto-sizing pane per specialist agent
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - meetcat renders a bubbletea or tview TUI with one pane per running specialist plus a glossary pane
     - Panes auto-size based on available terminal width/height and the live content density of each specialist
@@ -344,6 +345,7 @@ targets:
     - T19.2
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-18
   T19.4:
     name: meetcat renders URLs, Jira tickets, and document refs as OSC 8 hyperlinks
     status: identified
