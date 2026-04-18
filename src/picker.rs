@@ -127,13 +127,17 @@ impl ApplicationHandler for PickerApp {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                {
-                    self.result = None;
-                    event_loop.exit();
-                }
+            WindowEvent::KeyboardInput {
+                event:
+                    winit::event::KeyEvent {
+                        state: ElementState::Pressed,
+                        logical_key: Key::Named(NamedKey::Escape),
+                        ..
+                    },
+                ..
+            } => {
+                self.result = None;
+                event_loop.exit();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_px = Some(position);
@@ -466,26 +470,29 @@ impl ApplicationHandler for CropPickerApp {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Escape) => {
-                            self.result = None;
+            WindowEvent::KeyboardInput {
+                event:
+                    winit::event::KeyEvent {
+                        state: ElementState::Pressed,
+                        ref logical_key,
+                        ..
+                    },
+                ..
+            } => match logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.result = None;
+                    event_loop.exit();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let (Some(a), Some(b)) = (self.start_px, self.pointer_px) {
+                        if let Some(crop) = self.crop_from_drag(a, b) {
+                            self.result = Some(crop);
                             event_loop.exit();
                         }
-                        Key::Named(NamedKey::Enter) => {
-                            // Confirm current drag if any.
-                            if let (Some(a), Some(b)) = (self.start_px, self.pointer_px) {
-                                if let Some(crop) = self.crop_from_drag(a, b) {
-                                    self.result = Some(crop);
-                                    event_loop.exit();
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
-            }
+                _ => {}
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_px = Some(position);
                 if self.start_px.is_some() {
