@@ -184,9 +184,10 @@ targets:
     achieved: 2026-04-18
   T13:
     name: meetcat runs skeptic / constructive / neutral specialists as parallel persistent sessions
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
+    actual_cost: 2.0
     acceptance:
     - 'Three claudia.Agent sessions run in parallel across a meeting: `skeptic`, `constructive`, `neutral`'
     - Each session has a system prompt loaded from config; defaults are checked into the repo as `docs/specialists/{skeptic,constructive,neutral}.md`
@@ -199,6 +200,7 @@ targets:
     - T19.3
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T14:
     name: meetcat's contradictions session flags cross-meeting conflicts via mnemo in real time
     status: identified
@@ -219,9 +221,10 @@ targets:
     discovered: 2026-04-14
   T15:
     name: Stopping capture leaves meetcat's neutral session attachable for post-meeting Q&A
-    status: identified
+    status: achieved
     value: 5.0
     cost: 2.0
+    actual_cost: 2.0
     acceptance:
     - On meeting-stop, meetcat leaves the `neutral` claudia.Agent session alive (tmux-backed) instead of terminating it
     - The user can attach via `meetcat attach neutral` (or equivalent) and immediately resume the conversation with full artifact context loaded
@@ -234,6 +237,7 @@ targets:
     - T19.2
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T16:
     name: meetcat's dejargoniser session expands acronyms using a local Confluence glossary cache
     status: identified
@@ -253,9 +257,10 @@ targets:
     discovered: 2026-04-14
   T17:
     name: Weekly meta-pattern digest is produced by a scheduled `claude -p /skill` invocation over the week's artifacts
-    status: identified
+    status: achieved
     value: 3.0
     cost: 2.0
+    actual_cost: 1.0
     acceptance:
     - A `/meetings-digest` (or similar) skill exists and produces a weekly digest from a directory of artifact folders
     - A cron/launchd entry invokes it on schedule
@@ -267,6 +272,7 @@ targets:
     - T12
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T18:
     name: pageflip emits a structured slide-event NDJSON stream that downstream tools consume
     status: achieved
@@ -348,10 +354,11 @@ targets:
     achieved: 2026-04-18
   T19.4:
     name: meetcat renders URLs, Jira tickets, and document refs as OSC 8 hyperlinks
-    status: identified
+    status: achieved
     value: 5.0
     cost: 2.0
     observable: true
+    actual_cost: 1.0
     acceptance:
     - URLs in specialist output are rewritten in the TUI as OSC 8 terminal hyperlinks (`\x1b]8;;URL\x07TEXT\x1b]8;;\x07`)
     - Known patterns (Jira keys, Confluence page names, GitHub PR/issue refs, Slack permalinks) are detected by the resolver (T11) and rewritten as hyperlinks to the resolved URL, with the human-readable title as the link text
@@ -362,6 +369,7 @@ targets:
     - T19.3
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-18
   T2:
     name: Interactive region picker lets the user draw a rectangle on the desktop (macOS)
     status: achieved
