@@ -105,10 +105,11 @@ targets:
     achieved: 2026-04-15
   T10.2:
     name: PII text redactor masks emails, phones, card numbers, IDs, and named entities in OCR'd frame text
-    status: identified
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - Frames pass through OCR (Apple Vision VNRecognizeTextRequest on macOS) to yield per-word bounding boxes + strings
     - A regex-based PII detector flags emails, phone numbers, credit-card numbers, and government-ID patterns
@@ -120,6 +121,7 @@ targets:
     - T10.1
     origin: manual
     discovered: 2026-04-15
+    achieved: 2026-04-18
   T10.3:
     name: App allowlist + paranoid mode + architectural egress gate enforce redaction before network egress
     status: achieved
