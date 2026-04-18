@@ -152,6 +152,7 @@ type SessionPool struct {
 	workDir   string
 	logger    *Logger
 	stderr    io.Writer
+	glossary  *GlossaryCache // optional; nil means no glossary lookups
 
 	// allowedNames is the optional filter set from --specialists.
 	// nil means all specialists are allowed.
@@ -176,12 +177,14 @@ func specialistSessionID(meetingID, name string) string {
 // NewSessionPool creates a pool but does not start any agents yet.
 // workDir is the working directory passed to claudia.Start.
 // allowedNames, if non-nil, restricts which specialists are started.
-func NewSessionPool(meetingID, workDir string, stderr io.Writer, logger *Logger, allowedNames map[string]bool) *SessionPool {
+// glossary may be nil; when provided, slide messages include glossary preambles.
+func NewSessionPool(meetingID, workDir string, stderr io.Writer, logger *Logger, allowedNames map[string]bool, glossary *GlossaryCache) *SessionPool {
 	return &SessionPool{
 		meetingID:    meetingID,
 		workDir:      workDir,
 		logger:       logger,
 		stderr:       stderr,
+		glossary:     glossary,
 		allowedNames: allowedNames,
 		specialists:  make(map[string]*specialistState),
 	}
@@ -261,8 +264,24 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef) {
 
 // SendSlide injects a standardised slide message into all running
 // agents in parallel and waits for all responses.
+//
+// When a glossary cache is configured, known acronyms from the slide text
+// are prepended as [Glossary: ...] lines. Unknown acronyms trigger a
+// background claudia.Task (haiku) research pass — results are cached but
+// not waited on (🎯T16).
 func (p *SessionPool) SendSlide(ctx context.Context, ev *slideEvent) {
-	msg := renderSlideMessage(ev)
+	msg := renderSlideMessage(ev, p.glossary)
+
+	// Fire background research for unknown acronyms found in the slide.
+	if p.glossary != nil {
+		slideText := slideEventText(ev)
+		for _, acronym := range ExtractAcronyms(slideText) {
+			if p.glossary.Lookup(acronym) == nil {
+				a := acronym
+				go ResearchAcronym(ctx, a, p.glossary, p.workDir)
+			}
+		}
+	}
 
 	p.mu.Lock()
 	snapshot := make(map[string]*specialistState, len(p.specialists))
@@ -385,18 +404,42 @@ func (p *SessionPool) TurnSummary() map[string]int {
 
 // renderSlideMessage formats a slideEvent into the standardised
 // message injected into each specialist agent.
-func renderSlideMessage(ev *slideEvent) string {
-	msg := fmt.Sprintf("[slide %s @ %d]\nPath: %s", ev.SlideID, ev.TStartMs, ev.Path)
+//
+// When glossary is non-nil, any known acronyms found in the slide text are
+// prepended as [Glossary: ACRONYM = Expansion (source)] lines so that the
+// dejargoniser (and other specialists) can reference authoritative expansions
+// without relying solely on their accumulated session memory (🎯T16).
+func renderSlideMessage(ev *slideEvent, glossary *GlossaryCache) string {
+	// Build the body first so we can extract acronyms from all fields.
+	body := fmt.Sprintf("[slide %s @ %d]\nPath: %s", ev.SlideID, ev.TStartMs, ev.Path)
 	if len(ev.OCR) > 0 && string(ev.OCR) != "null" {
-		msg += fmt.Sprintf("\nOCR: %s", string(ev.OCR))
+		body += fmt.Sprintf("\nOCR: %s", string(ev.OCR))
 	}
 	if len(ev.TranscriptWindow) > 0 && string(ev.TranscriptWindow) != "null" {
-		msg += fmt.Sprintf("\nTranscript: %s", string(ev.TranscriptWindow))
+		body += fmt.Sprintf("\nTranscript: %s", string(ev.TranscriptWindow))
 	}
 	if ev.FrontmostApp != "" {
-		msg += fmt.Sprintf("\nApp: %s", ev.FrontmostApp)
+		body += fmt.Sprintf("\nApp: %s", ev.FrontmostApp)
 	}
-	return msg
+
+	preamble := GlossaryPreamble(slideEventText(ev), glossary)
+	if preamble == "" {
+		return body
+	}
+	return preamble + body
+}
+
+// slideEventText returns a single string containing all human-readable text
+// from a slide event, used for acronym extraction.
+func slideEventText(ev *slideEvent) string {
+	parts := []string{ev.Path, ev.FrontmostApp}
+	if len(ev.OCR) > 0 && string(ev.OCR) != "null" {
+		parts = append(parts, string(ev.OCR))
+	}
+	if len(ev.TranscriptWindow) > 0 && string(ev.TranscriptWindow) != "null" {
+		parts = append(parts, string(ev.TranscriptWindow))
+	}
+	return strings.Join(parts, " ")
 }
 
 // AttachCommand returns the tmux command to attach to the named

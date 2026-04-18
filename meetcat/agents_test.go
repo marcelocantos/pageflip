@@ -20,7 +20,7 @@ func TestRenderSlideMessageMinimal(t *testing.T) {
 		TStartMs: 1000,
 		TEndMs:   2000,
 	}
-	msg := renderSlideMessage(ev)
+	msg := renderSlideMessage(ev, nil)
 
 	if !strings.Contains(msg, "[slide s1 @ 1000]") {
 		t.Errorf("missing slide header; got: %q", msg)
@@ -52,7 +52,7 @@ func TestRenderSlideMessageFull(t *testing.T) {
 		TranscriptWindow: json.RawMessage(transcript),
 		FrontmostApp:     "Teams",
 	}
-	msg := renderSlideMessage(ev)
+	msg := renderSlideMessage(ev, nil)
 
 	if !strings.Contains(msg, "[slide deck-17 @ 5000]") {
 		t.Errorf("missing slide header; got: %q", msg)
@@ -77,7 +77,7 @@ func TestRenderSlideMessageNullOCRSkipped(t *testing.T) {
 		TEndMs:   100,
 		OCR:      json.RawMessage("null"),
 	}
-	msg := renderSlideMessage(ev)
+	msg := renderSlideMessage(ev, nil)
 	if strings.Contains(msg, "OCR:") {
 		t.Errorf("null OCR should be omitted; got: %q", msg)
 	}

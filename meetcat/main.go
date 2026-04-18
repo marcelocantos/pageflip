@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -50,19 +51,22 @@ INVOCATION
   meetcat < events.jsonl
   meetcat --log-file session.ndjson
   meetcat doctor [--log-file session.ndjson]
+  meetcat glossary refresh --confluence-url https://company.atlassian.net/wiki
   meetcat --help
   meetcat --help-agent
   meetcat --version
 
 SUBCOMMANDS
-  doctor   Print a markdown diagnostic report (versions, tools, auth, log).
+  doctor            Print a markdown diagnostic report (versions, tools, auth, log).
+  glossary refresh  Scrape Confluence for glossary entries and populate the cache.
 
 FLAGS
-  --log-file <path>   Write a structured NDJSON session log to <path>.
-                      Events contain no meeting content — only identifiers,
-                      token counts, costs, and categorical codes.
-  --agents            Spawn claudia specialist sessions for each slide.
-  --work-dir <path>   Working directory passed to claudia agents.
+  --log-file <path>       Write a structured NDJSON session log to <path>.
+                          Events contain no meeting content — only identifiers,
+                          token counts, costs, and categorical codes.
+  --agents                Spawn claudia specialist sessions for each slide.
+  --work-dir <path>       Working directory passed to claudia agents.
+  --glossary-cache <path> Path to glossary JSON cache (default: ~/.pageflip/glossary.json).
 
 INPUT CONTRACT
   Stdin is NDJSON: one JSON object per newline, matching
@@ -152,6 +156,9 @@ func main() {
 			}
 			runDoctor(os.Stdout, *logFile)
 			return
+		case "glossary":
+			runGlossarySubcommand(os.Args[2:])
+			return
 		case "attach":
 			attachFlags := flag.NewFlagSet("attach", flag.ExitOnError)
 			meetingID := attachFlags.String("meeting", "", "Meeting session ID (meetcat-<timestamp>).")
@@ -184,6 +191,7 @@ func main() {
 	enableAgents := flag.Bool("agents", false, "Spawn claudia specialist sessions for each slide.")
 	workDir := flag.String("work-dir", ".", "Working directory passed to claudia agents.")
 	specialistsFlag := flag.String("specialists", "", "Comma-separated list of specialists to start (default: all). E.g. skeptic,neutral")
+	glossaryCachePath := flag.String("glossary-cache", defaultGlossaryCachePath(), "Path to glossary JSON cache.")
 	flag.Parse()
 
 	switch {
@@ -210,11 +218,22 @@ func main() {
 		defer f.Close()
 	}
 
+	// Load glossary cache (best-effort; errors are printed but don't abort).
+	var glossary *GlossaryCache
+	if *glossaryCachePath != "" {
+		var err error
+		glossary, err = NewGlossaryCache(*glossaryCachePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "meetcat: glossary cache: %v (continuing without)\n", err)
+			glossary = nil
+		}
+	}
+
 	var pool *SessionPool
 	if *enableAgents {
 		meetingID := MeetingSessionID()
 		allowedNames := ParseSpecialistNames(*specialistsFlag)
-		pool = NewSessionPool(meetingID, *workDir, os.Stderr, logger, allowedNames)
+		pool = NewSessionPool(meetingID, *workDir, os.Stderr, logger, allowedNames, glossary)
 	}
 
 	if err := run(context.Background(), os.Stdin, os.Stderr, logger, pool); err != nil {
@@ -420,5 +439,76 @@ func wireTokenHooks(pool *SessionPool, msgCh chan<- tea.Msg) {
 				msgCh <- tuiTurnDoneMsg{name: name}
 			}
 		})
+	}
+}
+
+// defaultGlossaryCachePath returns the default path for the glossary JSON
+// cache: ~/.pageflip/glossary.json. Falls back to "./glossary.json" if
+// the home directory cannot be determined.
+func defaultGlossaryCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "glossary.json"
+	}
+	return filepath.Join(home, ".pageflip", "glossary.json")
+}
+
+// runGlossarySubcommand dispatches the "glossary <verb>" subcommand family.
+// Currently only "glossary refresh" is implemented.
+func runGlossarySubcommand(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: meetcat glossary <refresh>")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "refresh":
+		runGlossaryRefresh(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "meetcat glossary: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+// runGlossaryRefresh implements "meetcat glossary refresh".
+// It scrapes Confluence for glossary/acronym pages and writes results to
+// the local cache. Pass --dry-run to preview without writing.
+func runGlossaryRefresh(args []string) {
+	fs := flag.NewFlagSet("glossary refresh", flag.ExitOnError)
+	confluenceURL := fs.String("confluence-url", "", "Confluence base URL (e.g. https://company.atlassian.net/wiki).")
+	cachePath := fs.String("cache-path", defaultGlossaryCachePath(), "Path to glossary JSON cache.")
+	workDir := fs.String("work-dir", ".", "Working directory passed to claudia agents.")
+	dryRun := fs.Bool("dry-run", false, "Show what would be added without writing to the cache.")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat glossary refresh:", err)
+		os.Exit(2)
+	}
+
+	if *confluenceURL == "" {
+		fmt.Fprintln(os.Stderr, "meetcat glossary refresh: --confluence-url is required")
+		os.Exit(2)
+	}
+
+	cache, err := NewGlossaryCache(*cachePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat glossary refresh:", err)
+		os.Exit(1)
+	}
+
+	before := cache.Len()
+	fmt.Fprintf(os.Stdout, "meetcat: glossary refresh from %s (cache has %d entries)\n", *confluenceURL, before)
+	if *dryRun {
+		fmt.Fprintln(os.Stdout, "meetcat: --dry-run: no changes will be written")
+	}
+
+	added, err := RefreshFromConfluence(context.Background(), *confluenceURL, cache, *workDir, *dryRun)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat glossary refresh:", err)
+		// Don't exit — partial results may have been written.
+	}
+
+	if *dryRun {
+		fmt.Fprintf(os.Stdout, "meetcat: would add %d new entries\n", added)
+	} else {
+		fmt.Fprintf(os.Stdout, "meetcat: added %d new entries (cache now has %d)\n", added, cache.Len())
 	}
 }
