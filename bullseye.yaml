@@ -143,9 +143,10 @@ targets:
     achieved: 2026-04-18
   T11:
     name: meetcat's resolver runs as a stateless Task-mode agent turning extracted strings into hyperlinked refs
-    status: identified
+    status: achieved
     value: 8.0
     cost: 8.0
+    actual_cost: 2.0
     acceptance:
     - Resolver stages are registerable via config; adding a new reference type (Jira project, Confluence space, internal tool) does not require changes to meetcat's core event loop
     - Built-in stages cover URLs, Jira keys, Confluence page titles, GitHub PR/issue refs, Slack permalinks
@@ -159,12 +160,14 @@ targets:
     - T9.2
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T12:
     name: meetcat's neutral session writes a structured meeting artifact folder at meeting stop
-    status: converging
+    status: achieved
     value: 8.0
     cost: 5.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - On meeting-stop, meetcat asks its neutral session agent to emit `decisions.md`, `actions.md`, `open-questions.md`, `contradictions.md`, `references.json` based on the full accumulated session context
     - The artifact folder also contains `slides/*.png` (symlinked or copied from pageflip's output dir), `transcript.jsonl` (from T9.2/T9.3), and session-id pointers for each specialist so the user can attach later
@@ -178,6 +181,7 @@ targets:
     - T19.2
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T13:
     name: meetcat runs skeptic / constructive / neutral specialists as parallel persistent sessions
     status: identified
