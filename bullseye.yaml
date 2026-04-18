@@ -484,10 +484,11 @@ targets:
     achieved: 2026-04-15
   T8:
     name: pageflip is installable via Homebrew tap and ships release binaries on tag
-    status: identified
+    status: achieved
     value: 3.0
     cost: 3.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - '`brew install marcelocantos/tap/pageflip` installs a working macOS arm64 binary'
     - Tagging `v0.1.0` on master triggers a GitHub Actions workflow that builds, tests, and publishes release binaries
@@ -499,6 +500,7 @@ targets:
     - T2
     origin: manual
     discovered: 2026-04-14
+    achieved: 2026-04-18
   T9:
     name: System audio is captured alongside frames and transcribed locally with speaker attribution
     status: achieved
