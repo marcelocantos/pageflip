@@ -330,10 +330,18 @@ fn run(cli: &Cli) -> Result<(), String> {
 
     let mut slides_saved: u32 = 0;
     let mut slides_deduped: u32 = 0;
+    let mut tick_n: u64 = 0;
 
     loop {
         let tick_start = std::time::Instant::now();
+        tick_n += 1;
 
+        // 🎯T23 / 🎯T24 visibility: one stderr line per tick so the user
+        // can see capture is alive and tell saved-vs-deduped without
+        // needing slide events to reach meetcat. dist=— means the first
+        // frame (no prior hash to compare); dist=0 repeating means the
+        // capture backend is returning stale pixels (the macOS xcap bug
+        // T24 works around).
         match capture_once(
             backend.as_ref(),
             &target,
@@ -345,8 +353,19 @@ fn run(cli: &Cli) -> Result<(), String> {
             slog.as_mut(),
             cli.threshold,
         ) {
-            Ok(SaveResult::Saved) => slides_saved += 1,
-            Ok(SaveResult::Deduped) => slides_deduped += 1,
+            Ok(SaveResult::Saved { dist }) => {
+                let elapsed_ms = tick_start.elapsed().as_millis();
+                let dist_str = dist
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                eprintln!("pageflip: tick #{tick_n} dist={dist_str} action=saved ({elapsed_ms}ms)");
+                slides_saved += 1;
+            }
+            Ok(SaveResult::Deduped { dist }) => {
+                let elapsed_ms = tick_start.elapsed().as_millis();
+                eprintln!("pageflip: tick #{tick_n} dist={dist} action=deduped ({elapsed_ms}ms)");
+                slides_deduped += 1;
+            }
             Err(e) => return Err(e),
         }
 
@@ -393,8 +412,12 @@ fn run(cli: &Cli) -> Result<(), String> {
 }
 
 enum SaveResult {
-    Saved,
-    Deduped,
+    /// Frame passed dedup and was written. `dist` is None for the very
+    /// first frame (no previous frame to compare against).
+    Saved { dist: Option<u32> },
+    /// Frame was deduplicated against the last saved frame; `dist` is
+    /// always populated because we have a previous hash to compare.
+    Deduped { dist: u32 },
 }
 
 fn start_audio_capture(
@@ -526,17 +549,18 @@ fn capture_once(
     let phash_hex = match phash_opt {
         Some(h) => h,
         None => {
+            let d = dist.unwrap_or(0);
             if let Some(sl) = slog {
                 sl.log(LogEvent::SlideDeduped {
                     t_ms: t_start_ms,
-                    dist: dist.unwrap_or(0),
+                    dist: d,
                     threshold,
                 });
             }
-            return Ok(SaveResult::Deduped);
+            return Ok(SaveResult::Deduped { dist: d });
         }
     };
-    let _ = dist;
+    let saved_dist = dist;
 
     let slug = timestamp_slug();
 
@@ -596,7 +620,7 @@ fn capture_once(
             .and_then(|_| stdout.flush())
             .map_err(|e| format!("stdout write failed: {e}"))?;
     }
-    Ok(SaveResult::Saved)
+    Ok(SaveResult::Saved { dist: saved_dist })
 }
 
 /// Returns milliseconds since the Unix epoch.
