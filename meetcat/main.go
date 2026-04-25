@@ -189,6 +189,7 @@ func main() {
 	windowFlag := flag.Bool("window", false, "Forwarded to pageflip as --window (interactive window picker).")
 	windowTitleFlag := flag.String("window-title", "", "Forwarded to pageflip as --window-title SUBSTRING.")
 	windowIDFlag := flag.String("window-id", "", "Forwarded to pageflip as --window-id ID.")
+	webDirFlag := flag.String("web-dir", "", "Dev-only: serve HTML/CSS/JS from this directory instead of the embedded copy. Reload the tab to pick up edits.")
 	flag.Parse()
 	enableAgents := !*noAgents
 
@@ -231,6 +232,7 @@ func main() {
 		},
 		Logger:      logger,
 		OpenBrowser: true,
+		WebDir:      *webDirFlag,
 	}
 
 	if err := runMeeting(cfg); err != nil {
@@ -260,6 +262,10 @@ type meetingConfig struct {
 	// reconnect via EventSource — opening a new tab would compete
 	// with that one for focus.
 	OpenBrowser bool
+
+	// WebDir is the dev-only path from which to serve HTML/CSS/JS.
+	// Empty means use the embedded copy compiled into the binary.
+	WebDir string
 }
 
 // runMeeting wires up the TUI, spawns pageflip (or reads stdin),
@@ -293,7 +299,7 @@ func runMeeting(cfg meetingConfig) error {
 			return fmt.Errorf("resolve work dir: %w", err)
 		}
 		h := newHub()
-		url, shutdown, err := startWebServer(cfg.MeetingID, absWork, h)
+		url, shutdown, err := startWebServer(cfg.MeetingID, absWork, cfg.WebDir, h)
 		if err != nil {
 			return fmt.Errorf("start web server: %w", err)
 		}

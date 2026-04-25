@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -320,15 +321,52 @@ func (s *webSink) SystemLine(text string) {
 
 // startWebServer binds an HTTP listener on localhost (auto-port),
 // returns the public URL plus a shutdown function. The server hosts
-// three routes:
+// these routes:
 //
-//   - GET /            — embedded index.html
+//   - GET /            — index.html
+//   - GET /style.css   — stylesheet
+//   - GET /script.js   — frontend module
+//   - GET /meeting     — JSON metadata
 //   - GET /events      — SSE stream of webEvents
 //   - GET /slides/...  — slide PNGs from the work directory
 //
+// When webDir is non-empty, the static assets (HTML/CSS/JS) are
+// served from that directory on every request — refresh the tab to
+// pick up any edit. When webDir is empty, the embedded copy from
+// `go:embed web/*` is used. The dev-loop friction was unbearable
+// while everything was embed-only: a CSS tweak meant a Go rebuild
+// and a server restart, which dropped the SSE connection and lost
+// meeting state.
+//
 // shutdown blocks until in-flight requests complete or a 2 s grace
 // timer expires, then closes the listener.
-func startWebServer(meetingID, workDir string, h *hub) (string, func(), error) {
+func startWebServer(meetingID, workDir, webDir string, h *hub) (string, func(), error) {
+	readAsset := func(name string) ([]byte, error) {
+		if webDir != "" {
+			return os.ReadFile(filepath.Join(webDir, name))
+		}
+		return webAssets.ReadFile("web/" + name)
+	}
+
+	serveAsset := func(name, contentType string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			data, err := readAsset(name)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", contentType)
+			// Disable caching in dev mode so reloads always pick up
+			// the latest disk content; in embed mode the binary
+			// version is the only version, so caching doesn't help
+			// or hurt.
+			if webDir != "" {
+				w.Header().Set("Cache-Control", "no-store")
+			}
+			_, _ = w.Write(data)
+		}
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -336,34 +374,11 @@ func startWebServer(meetingID, workDir string, h *hub) (string, func(), error) {
 			http.NotFound(w, r)
 			return
 		}
-		data, err := webAssets.ReadFile("web/index.html")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
+		serveAsset("index.html", "text/html; charset=utf-8")(w, r)
 	})
 
-	mux.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
-		data, err := webAssets.ReadFile("web/style.css")
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		_, _ = w.Write(data)
-	})
-
-	mux.HandleFunc("/script.js", func(w http.ResponseWriter, r *http.Request) {
-		data, err := webAssets.ReadFile("web/script.js")
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		_, _ = w.Write(data)
-	})
+	mux.HandleFunc("/style.css", serveAsset("style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/script.js", serveAsset("script.js", "application/javascript; charset=utf-8"))
 
 	mux.HandleFunc("/meeting", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
