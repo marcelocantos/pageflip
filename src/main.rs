@@ -105,8 +105,12 @@ struct Cli {
     #[arg(long)]
     crop: bool,
 
-    /// Capture interval in seconds.
-    #[arg(long, default_value_t = 2.0, value_name = "SECS")]
+    /// Capture interval in seconds. Default 1.0 — fast enough to catch
+    /// presenters flicking through a couple of slides per second
+    /// without breaking a sweat. Each tick costs ~150 ms on macOS
+    /// (screencapture subprocess), so the loop sits idle ~85% of the
+    /// time at the default.
+    #[arg(long, default_value_t = 1.0, value_name = "SECS")]
     interval: f64,
 
     /// pHash Hamming-distance threshold; frames closer than this to the last saved frame are skipped.

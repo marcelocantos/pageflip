@@ -91,22 +91,27 @@ type tuiLineMsg struct {
 	line string
 }
 
-// tuiAttributedLineMsg carries a specialist line that's tied to a
-// specific slide and role. Routed into that slide's section so
-// output stays grouped per frame even when a slow specialist
-// completes turns out of order with respect to newer slides. The
-// role is needed so the model can replace these lines in bulk
-// once the turn finishes (tuiSpecialistTurnDoneMsg).
+// tuiAttributedLineMsg carries one streaming chunk from a specialist
+// for a specific slide. The chunk is appended to that section's
+// per-role running buffer, the buffer is glamour-rendered, and the
+// rendered output replaces the section's role-tagged sectionLine.
+// Rendering on each chunk (rather than only at turn-end) lets the
+// operator watch markdown form up live; momentarily-malformed
+// markdown self-corrects when the next chunk lands or when
+// tuiSpecialistTurnDoneMsg supplies the canonical full text.
 type tuiAttributedLineMsg struct {
 	role    string
 	slideID string
-	line    string
+	chunk   string
 }
 
 // tuiSpecialistTurnDoneMsg signals that a specialist has finished
-// streaming a complete response. The TUI replaces the raw streamed
-// chunks in the matching section with a single glamour-rendered
-// markdown block.
+// streaming a complete response. The model replaces the running
+// raw buffer with the canonical fullText supplied here, then
+// re-renders. Sent from the worker after WaitForResponse returns
+// so the final state is well-formed even if the streaming chunks
+// happened to leave the buffer in a transient odd state (open
+// fence, half-emitted bullet, etc.).
 type tuiSpecialistTurnDoneMsg struct {
 	role    string
 	slideID string
@@ -171,10 +176,19 @@ type sectionLine struct {
 // arrival order. Sections render in slide-arrival order regardless
 // of when individual specialist output lands, so out-of-order
 // specialist completion stays visually grouped.
+//
+// rawTurns holds the streaming-buffer of each role's current turn
+// keyed by role; on every chunk the buffer is appended to and the
+// whole accumulated markdown is re-rendered via glamour. The
+// render-replace approach lets the operator watch markdown form up
+// live; transient malformed states (open code fence, half-emitted
+// list) self-correct on the next chunk or the canonical full-text
+// override sent on tuiSpecialistTurnDoneMsg.
 type tuiSection struct {
-	slideID string
-	header  string
-	lines   []sectionLine
+	slideID  string
+	header   string
+	lines    []sectionLine
+	rawTurns map[string]string
 }
 
 // tuiNode is one renderable block in the viewport. Either a
@@ -252,15 +266,11 @@ func newTUIModel(meetingID string) tuiModel {
 }
 
 // renderNodes flattens the node list into a single string for the
-// viewport. Sections render as: header line, then each attributed
-// line indented two spaces so the visual hierarchy is unmistakable.
-// Loose blocks render their lines verbatim with no indent.
-//
-// sectionLine.text may span multiple lines (after a glamour
-// markdown render replaces a streamed chunk run), so each entry is
-// split on '\n' before the indent is applied — otherwise only the
-// first physical line of a multi-line block would be indented and
-// the rest would extrude back to column 0.
+// viewport. Sections render as: header line, then each sectionLine
+// verbatim — the emoji gutter is already baked into each line's
+// text by renderMarkdown / formatWithGutter, so no extra indent
+// is applied here. Loose blocks render their lines verbatim with
+// no indent.
 func (m *tuiModel) renderNodes() string {
 	var b strings.Builder
 	for i, n := range m.nodes {
@@ -271,11 +281,8 @@ func (m *tuiModel) renderNodes() string {
 		case n.section != nil:
 			b.WriteString(n.section.header)
 			for _, l := range n.section.lines {
-				for _, sub := range strings.Split(l.text, "\n") {
-					b.WriteByte('\n')
-					b.WriteString("  ")
-					b.WriteString(sub)
-				}
+				b.WriteByte('\n')
+				b.WriteString(l.text)
 			}
 		default:
 			for j, l := range n.loose {
@@ -311,43 +318,82 @@ func (m *tuiModel) openSection(slideID, header string) {
 	m.nodes = append(m.nodes, tuiNode{section: sec})
 }
 
-// appendAttributed routes a specialist line into its slide's section.
-// If the slide hasn't been opened yet (race: agent emits before the
-// decode loop fires the slide-arrived msg), fall back to a loose
-// block so the line isn't lost.
-func (m *tuiModel) appendAttributed(role, slideID, line string) {
+// appendChunkAndRender accumulates one streaming chunk into the
+// section's running buffer for (slideID, role) and replaces that
+// role's sectionLine with a fresh glamour-rendered version of the
+// accumulated buffer. Falls back to a loose-block append when the
+// slide section hasn't been opened yet (rare race).
+func (m *tuiModel) appendChunkAndRender(role, slideID, chunk string) {
 	i, ok := m.slideIdx[slideID]
 	if !ok {
-		m.appendLoose(line)
+		m.appendLoose(tag(role) + " " + chunk)
 		return
 	}
-	m.nodes[i].section.lines = append(m.nodes[i].section.lines, sectionLine{role: role, text: line})
+	sec := m.nodes[i].section
+	if sec.rawTurns == nil {
+		sec.rawTurns = map[string]string{}
+	}
+	sec.rawTurns[role] += chunk
+	rendered := m.renderMarkdown(role, sec.rawTurns[role])
+	m.replaceSpecialistLines(role, slideID, rendered)
 }
 
-// renderMarkdown takes a specialist's full turn text and returns a
-// glamour-rendered version sized to the current viewport width.
-// The role tag is prepended on its own line so the operator still
-// knows whose output this block is — glamour by itself would
-// produce just the rendered analysis with no attribution. On
-// rendering error (rare; usually means glamour didn't like the
-// input), falls back to the plain text so nothing is lost.
+// gutterWidth is the visual column count taken by the emoji gutter
+// at the left of every specialist block. Two cells for the emoji
+// (most modern terminals render them at width 2) plus one space.
+const gutterWidth = 3
+
+// renderMarkdown takes a specialist's running turn text and returns
+// a glamour-rendered version with the role's emoji prepended as a
+// gutter on the first line and matching whitespace on continuation
+// lines. Sized to the current viewport width minus the gutter.
+//
+// Glamour can choke on streaming-incomplete markdown (open code
+// fences, half-emitted lists). On render error we fall back to the
+// raw text behind the same gutter so nothing is lost — the next
+// chunk usually closes the malformed pattern and the live render
+// recovers.
 func (m *tuiModel) renderMarkdown(role, text string) string {
-	wrap := m.width - 4 // 2-space section indent + small right margin
-	if wrap < 20 {
-		wrap = 20
-	}
+	wrap := max(m.width-gutterWidth-1, 20) // gutter + small right margin, with sane floor
 	r, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
 		glamour.WithWordWrap(wrap),
 	)
 	if err != nil {
-		return tag(role) + "\n" + text
+		return formatWithGutter(role, text)
 	}
 	out, err := r.Render(text)
 	if err != nil {
-		return tag(role) + "\n" + text
+		return formatWithGutter(role, text)
 	}
-	return tag(role) + "\n" + strings.TrimRight(out, "\n")
+	return formatWithGutter(role, strings.TrimRight(out, "\n"))
+}
+
+// formatWithGutter prepends the specialist's emoji + a space to the
+// first line of `text` and aligns subsequent lines under the same
+// content column with `gutterWidth` worth of leading spaces. The
+// result is a single multi-line string suitable for storing in a
+// sectionLine.text and emitting verbatim from renderNodes.
+func formatWithGutter(role, text string) string {
+	emoji, ok := specialistEmoji[role]
+	if !ok {
+		emoji = "·"
+	}
+	indent := strings.Repeat(" ", gutterWidth)
+	var b strings.Builder
+	for i, line := range strings.Split(text, "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		if i == 0 {
+			b.WriteString(emoji)
+			b.WriteByte(' ')
+		} else {
+			b.WriteString(indent)
+		}
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // replaceSpecialistLines drops every sectionLine in the slide's
@@ -414,13 +460,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tuiAttributedLineMsg:
-		m.appendAttributed(msg.role, msg.slideID, msg.line)
+		m.appendChunkAndRender(msg.role, msg.slideID, msg.chunk)
 		if m.ready {
 			m.viewport.SetContent(m.renderNodes())
 			m.viewport.GotoBottom()
 		}
 
 	case tuiSpecialistTurnDoneMsg:
+		// Override the running buffer with the canonical full text
+		// (in case the streaming render ended on a transient odd
+		// state) and re-render once more.
+		if i, ok := m.slideIdx[msg.slideID]; ok {
+			sec := m.nodes[i].section
+			if sec.rawTurns == nil {
+				sec.rawTurns = map[string]string{}
+			}
+			sec.rawTurns[msg.role] = msg.text
+		}
 		rendered := m.renderMarkdown(msg.role, msg.text)
 		m.replaceSpecialistLines(msg.role, msg.slideID, rendered)
 		if m.ready {
@@ -540,12 +596,18 @@ func (s *tuiSink) OpenSection(slideID, header string) {
 }
 
 func (s *tuiSink) SpecialistLine(role, slideID, text string) {
-	line := tag(role) + " " + text
 	if slideID == "" {
-		s.prog.Send(tuiLineMsg{line: line})
+		// Lifecycle line (startup error etc.) — no slide to attribute
+		// to, so format with the [role] tag and route as a loose
+		// system line.
+		s.prog.Send(tuiLineMsg{line: tag(role) + " " + text})
 		return
 	}
-	s.prog.Send(tuiAttributedLineMsg{role: role, slideID: slideID, line: line})
+	// Attributed chunk: hand the raw text to the model, which
+	// accumulates it in the section's per-role buffer and re-renders
+	// the markdown each time. The emoji gutter is applied by the
+	// rendered-output formatter, not here.
+	s.prog.Send(tuiAttributedLineMsg{role: role, slideID: slideID, chunk: text})
 }
 
 func (s *tuiSink) SpecialistTurnDone(role, slideID, fullText string) {
