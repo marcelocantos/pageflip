@@ -29,7 +29,7 @@ import (
 	"time"
 )
 
-const version = "0.0.1"
+const version = "0.2.0"
 
 // gitSHA is optionally set at link time via:
 //
