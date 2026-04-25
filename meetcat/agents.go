@@ -7,6 +7,8 @@
 // sessions and streaming slide events into them.
 // 🎯T13: prompts loaded from meetcat/prompts/*.md; --specialists flag.
 // 🎯T15: neutral session stays alive after StopAll; SessionIDs exported.
+// 🎯T23: per-specialist worker goroutine drains a buffered channel
+// serially, so SendSlide returns the moment messages are queued.
 package main
 
 import (
@@ -149,6 +151,14 @@ func ParseSpecialistNames(raw string) map[string]bool {
 	return set
 }
 
+// slideQueueSize is the per-specialist message queue capacity. It is
+// pragmatically unbounded for human-paced meetings (a 1-hour session
+// at 1–2 minutes per slide produces 30–60 events). If SendSlide ever
+// blocks pushing here, the meeting has either out-paced any plausible
+// LLM throughput or one of the workers has stalled — investigate
+// rather than raise the limit.
+const slideQueueSize = 1024
+
 // specialistState holds a running specialist agent and its metrics.
 type specialistState struct {
 	name      string
@@ -157,6 +167,16 @@ type specialistState struct {
 	agent     *claudia.Agent
 	turnCount int
 	mu        sync.Mutex // guards turnCount
+
+	// 🎯T23: per-specialist work queue. SendSlide pushes one message
+	// per slide; runSpecialistWorker drains it serially, calling
+	// Send + WaitForResponse for each. This decouples the slide-event
+	// loop from per-specialist latency so meetcat keeps reading
+	// pageflip's NDJSON stream regardless of how long the previous
+	// slide is still being analysed. Closed by StopAll to signal
+	// drain-and-exit; the worker's for-range terminates once the
+	// channel is empty.
+	queue chan string
 }
 
 // SessionPool manages the set of specialist agents for one meeting.
@@ -173,6 +193,11 @@ type SessionPool struct {
 
 	mu          sync.Mutex
 	specialists map[string]*specialistState // guarded by mu; keyed by name
+	stopped     bool                        // guarded by mu; true after StopAll has closed queues
+
+	// workersWG tracks the per-specialist worker goroutines so
+	// StopAll can wait for queued slides to drain before returning.
+	workersWG sync.WaitGroup
 }
 
 // MeetingSessionID constructs a meeting-unique session ID from the
@@ -304,18 +329,71 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 	// role-acknowledgement round-trip to perform here.
 	release()
 
+	st.queue = make(chan string, slideQueueSize)
+
 	p.mu.Lock()
+	if p.stopped {
+		// StopAll ran while we were booting; abandon this specialist.
+		p.mu.Unlock()
+		agent.Stop()
+		return
+	}
 	p.specialists[spec.name] = st
+	p.workersWG.Add(1)
 	p.mu.Unlock()
+
+	go p.runSpecialistWorker(ctx, st)
 }
 
-// SendSlide injects a standardised slide message into all running
-// agents in parallel and waits for all responses.
+// runSpecialistWorker drains the specialist's queue serially. Exits
+// when the queue is closed (by StopAll) and fully drained.
+func (p *SessionPool) runSpecialistWorker(ctx context.Context, st *specialistState) {
+	defer p.workersWG.Done()
+	for msg := range st.queue {
+		p.processSlide(ctx, st, msg)
+	}
+}
+
+// processSlide sends one rendered slide message to one specialist
+// and waits for the response. Per-specialist serialisation is
+// guaranteed because only the worker goroutine ever calls this for
+// a given st.
+func (p *SessionPool) processSlide(ctx context.Context, st *specialistState, msg string) {
+	start := time.Now()
+
+	if err := st.agent.Send(msg); err != nil {
+		fmt.Fprintf(p.stderr, "%s %s\n", tag(st.name), colorize(colorError, fmt.Sprintf("send error: %v", err)))
+		p.logger.LogSpecialistError(st.name, "send_failed")
+		return
+	}
+
+	if _, err := st.agent.WaitForResponse(ctx); err != nil {
+		fmt.Fprintf(p.stderr, "%s %s\n", tag(st.name), colorize(colorError, fmt.Sprintf("response error: %v", err)))
+		p.logger.LogSpecialistError(st.name, "response_failed")
+		return
+	}
+
+	durationMs := time.Since(start).Milliseconds()
+
+	st.mu.Lock()
+	st.turnCount++
+	turnIdx := st.turnCount
+	st.mu.Unlock()
+
+	// Session mode doesn't provide token counts or cost. Pass zeros.
+	p.logger.LogSpecialistTurn(st.name, turnIdx, durationMs, 0, 0, 0)
+}
+
+// SendSlide queues a standardised slide message for every running
+// specialist and returns immediately. Each specialist's worker
+// goroutine drains its own queue serially, so per-specialist
+// response ordering is preserved without blocking the slide-event
+// loop on any one specialist's latency (🎯T23).
 //
-// When a glossary cache is configured, known acronyms from the slide text
-// are prepended as [Glossary: ...] lines. Unknown acronyms trigger a
-// background claudia.Task (haiku) research pass — results are cached but
-// not waited on (🎯T16).
+// When a glossary cache is configured, known acronyms from the slide
+// text are prepended as [Glossary: ...] lines. Unknown acronyms
+// trigger a background claudia.Task (haiku) research pass — results
+// are cached but not waited on (🎯T16).
 func (p *SessionPool) SendSlide(ctx context.Context, ev *slideEvent) {
 	msg := renderSlideMessage(ev, p.glossary)
 
@@ -330,70 +408,52 @@ func (p *SessionPool) SendSlide(ctx context.Context, ev *slideEvent) {
 		}
 	}
 
+	// Push under p.mu so we can't race a queue close in StopAll. The
+	// channels are deeply buffered (slideQueueSize = 1024); pushing
+	// is effectively non-blocking under any plausible meeting load,
+	// so holding the pool lock for this loop is fine.
 	p.mu.Lock()
-	snapshot := make(map[string]*specialistState, len(p.specialists))
-	for k, v := range p.specialists {
-		snapshot[k] = v
-	}
-	p.mu.Unlock()
-
-	var wg sync.WaitGroup
-	for name, st := range snapshot {
-		name, st := name, st
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			p.sendToSpecialist(ctx, name, st, msg)
-		}()
-	}
-	wg.Wait()
-}
-
-// sendToSpecialist sends msg to one specialist, waits for the
-// response, and records the turn in the logger.
-func (p *SessionPool) sendToSpecialist(ctx context.Context, name string, st *specialistState, msg string) {
-	start := time.Now()
-
-	if err := st.agent.Send(msg); err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorError, fmt.Sprintf("send error: %v", err)))
-		p.logger.LogSpecialistError(name, "send_failed")
+	defer p.mu.Unlock()
+	if p.stopped {
 		return
 	}
-
-	if _, err := st.agent.WaitForResponse(ctx); err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorError, fmt.Sprintf("response error: %v", err)))
-		p.logger.LogSpecialistError(name, "response_failed")
-		return
+	for _, st := range p.specialists {
+		st.queue <- msg
 	}
-
-	durationMs := time.Since(start).Milliseconds()
-
-	st.mu.Lock()
-	st.turnCount++
-	turnIdx := st.turnCount
-	st.mu.Unlock()
-
-	// Session mode doesn't provide token counts or cost. Pass zeros.
-	p.logger.LogSpecialistTurn(name, turnIdx, durationMs, 0, 0, 0)
 }
 
 // StopAll cleanly shuts down all running agents except the neutral
 // session, which is kept alive in tmux for post-meeting use (🎯T15).
-// The neutral agent is detached from the pool but its tmux session
-// persists. Turn counts are printed to stderr for all agents.
+// The neutral agent's tmux session persists; its worker goroutine
+// still drains any queued slides before exiting.
+//
+// 🎯T23: closes each specialist's queue, waits for its worker
+// goroutine to finish processing in-flight slides, then stops the
+// agent (or, for neutral, leaves it running). The drain step is
+// what guarantees the final slide's responses are not dropped.
 func (p *SessionPool) StopAll() {
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.stopped = true
 	snapshot := make(map[string]*specialistState, len(p.specialists))
 	for k, v := range p.specialists {
 		snapshot[k] = v
+		close(v.queue)
 	}
 	p.mu.Unlock()
 
+	// Wait for every worker to drain its queue before stopping the
+	// underlying agents — premature Stop() would race the worker's
+	// final WaitForResponse and lose the last slide's output.
+	p.workersWG.Wait()
+
 	var wg sync.WaitGroup
 	for name, st := range snapshot {
-		name, st := name, st
 		wg.Add(1)
-		go func() {
+		go func(name string, st *specialistState) {
 			defer wg.Done()
 			st.mu.Lock()
 			turns := st.turnCount
@@ -406,7 +466,7 @@ func (p *SessionPool) StopAll() {
 				st.agent.Stop()
 				fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorDim, fmt.Sprintf("stopped (turns: %d)", turns)))
 			}
-		}()
+		}(name, st)
 	}
 	wg.Wait()
 }

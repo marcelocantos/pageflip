@@ -454,7 +454,7 @@ targets:
     achieved: 2026-04-15
   T23:
     name: Slide event loop is decoupled from specialist response latency
-    status: identified
+    status: converging
     value: 0.0
     cost: 0.0
     observable: true
@@ -463,7 +463,7 @@ targets:
     - pool.SendSlide returns without waiting for any agent.Send or WaitForResponse
     - specialist responses still print in the order each specialist receives them (per-specialist serialisation preserved)
     - StopAll cleanly drains in-flight queues without dropping the final responses
-    context: 'Today, meetcat''s runText loop calls pool.SendSlide which wg.Waits for every specialist to finish responding before reading the next slide event. With 5 specialists at 10–60 s each, slides 2..N pile up unread in the pageflip→meetcat pipe; the user sees only ◆ [1] for the entire duration of the first slide''s analysis. This is the root cause of the long-running "frames not arriving" symptom that several capture-side fixes failed to address. Fix: each specialistState owns a buffered channel and a worker goroutine that drains it, calling Send + WaitForResponse serially per specialist. SendSlide renders the message once, pushes to every channel, returns. StopAll closes channels. Channels unbounded for now (per design decision: people spend 1–2 min per slide in practice).'
+    context: 'SendSlide refactored: each specialistState owns a slideQueueSize=1024 buffered channel; runSpecialistWorker drains it serially via Send + WaitForResponse. SendSlide pushes once per specialist under p.mu and returns. StopAll closes queues, waits on workersWG (so the final slide''s responses are flushed), then stops non-neutral agents. p.stopped guards against late SendSlide calls. Build/vet/tests green. Acceptance criteria 2, 3, 4 satisfied by construction; criterion 1 (meetcat reads next ◆ [N] within ~1 capture interval) needs real-meeting verification — same observable that T24 still owes — so leave at converging until a live session confirms both.'
     origin: manual
     discovered: 2026-04-25
   T24:
