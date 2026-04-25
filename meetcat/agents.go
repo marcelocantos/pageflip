@@ -29,6 +29,19 @@ import (
 // Default system prompts (inline fallbacks when config files are absent).
 // These strings must exactly match the content in meetcat/prompts/*.md so
 // that adding the files has no observable behaviour change.
+
+// readImagePreamble is prepended to every specialist's system prompt
+// so the agent always reads the slide PNG before analysing. Without
+// this, smaller models (notably haiku for the dejargoniser) treat
+// the slide message as text-only and respond "I need to view the
+// screenshot first" because the body is metadata only — the actual
+// slide content lives at the file path. Larger models infer this
+// implicitly; the preamble makes it explicit so all specialists
+// behave the same way.
+const readImagePreamble = `Every slide message you receive contains a "Path:" line pointing at a PNG screenshot of the slide. **Your first action on every message is to use the Read tool on that path to view the image.** The body of the message is metadata only; the visual content of the slide lives in the PNG. Do not produce any analysis output before reading the image. After reading, follow your role definition below.
+
+`
+
 const noPreambleRule = "\n\nOutput only your analysis of the slide. Never acknowledge your role, explain what you are about to do, ask for input, or emit any preamble, greeting, or sign-off. Your very first token in every response must be substantive analysis."
 
 const defaultSkepticPrompt = `You are a skeptical meeting analyst. For each slide, surface: assumptions that aren't stated, numbers that need sources, claims that contradict prior slides, and questions the presenter should be asked. Be concise — 3-5 bullets max.` + noPreambleRule
@@ -108,14 +121,16 @@ type specialistDef struct {
 }
 
 // allSpecialists returns the canonical list of specialist definitions,
-// loading prompts from config files when available.
+// loading prompts from config files when available. readImagePreamble
+// is prepended to every prompt so haiku-grade models behave the same
+// as sonnet/opus on the "first read the image, then analyse" step.
 func allSpecialists() []specialistDef {
 	return []specialistDef{
-		{"skeptic", "sonnet", loadPrompt("skeptic", defaultSkepticPrompt)},
-		{"constructive", "sonnet", loadPrompt("constructive", defaultConstructivePrompt)},
-		{"neutral", "sonnet", loadPrompt("neutral", defaultNeutralPrompt)},
-		{"dejargoniser", "haiku", loadPrompt("dejargoniser", defaultDejargoniserPrompt)},
-		{"contradictions", "opus", loadPrompt("contradictions", defaultContradictionsPrompt)},
+		{"skeptic", "sonnet", readImagePreamble + loadPrompt("skeptic", defaultSkepticPrompt)},
+		{"constructive", "sonnet", readImagePreamble + loadPrompt("constructive", defaultConstructivePrompt)},
+		{"neutral", "sonnet", readImagePreamble + loadPrompt("neutral", defaultNeutralPrompt)},
+		{"dejargoniser", "haiku", readImagePreamble + loadPrompt("dejargoniser", defaultDejargoniserPrompt)},
+		{"contradictions", "opus", readImagePreamble + loadPrompt("contradictions", defaultContradictionsPrompt)},
 	}
 }
 
