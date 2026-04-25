@@ -195,12 +195,60 @@ type specialistState struct {
 	queue chan slideJob
 }
 
+// StreamSink is the destination for streaming output emitted by the
+// SessionPool and runText. The plain (stderrSink) implementation
+// writes lines to stderr; the TUI implementation routes lines to a
+// bubbletea program that groups specialist output under each slide's
+// section header so out-of-order specialist completion stays visually
+// grouped per frame.
+type StreamSink interface {
+	// OpenSection signals that a new slide event has arrived. The
+	// sink may use slide_id to group later SpecialistLine calls that
+	// name this same slide_id under the section header.
+	OpenSection(slideID, header string)
+
+	// SpecialistLine emits one line of specialist output. slideID
+	// names the slide the specialist is currently processing, or ""
+	// for lifecycle messages (startup errors, "ready", "stopped").
+	SpecialistLine(role, slideID, text string)
+
+	// SystemLine emits one line that's not attributed to a specialist
+	// (revisits, EOF summary, phash warnings, end-of-meeting tallies).
+	SystemLine(text string)
+}
+
+// stderrSink is the plain (non-TTY) StreamSink. It writes everything
+// in chronological order to a single io.Writer, matching the
+// behaviour the project had before the bubbletea TUI was
+// re-introduced. Specialist tag is just "[role]"; the slide_id is
+// not surfaced in the prefix because the chronological order of
+// the stream already pairs each line with the section header above
+// it (most of the time — out-of-order completion is the price of
+// not running a TUI).
+type stderrSink struct {
+	w io.Writer
+}
+
+func newStderrSink(w io.Writer) *stderrSink { return &stderrSink{w: w} }
+
+func (s *stderrSink) OpenSection(_, header string) {
+	fmt.Fprintln(s.w, header)
+}
+
+func (s *stderrSink) SpecialistLine(role, _, text string) {
+	fmt.Fprintf(s.w, "%s %s\n", tag(role), text)
+}
+
+func (s *stderrSink) SystemLine(text string) {
+	fmt.Fprintln(s.w, text)
+}
+
 // SessionPool manages the set of specialist agents for one meeting.
 type SessionPool struct {
 	meetingID string
 	workDir   string
 	logger    *Logger
-	stderr    io.Writer
+	sink      StreamSink
 	glossary  *GlossaryCache // optional; nil means no glossary lookups
 
 	// allowedNames is the optional filter set from --specialists.
@@ -239,14 +287,16 @@ func specialistSessionID(meetingID, name string) string {
 
 // NewSessionPool creates a pool but does not start any agents yet.
 // workDir is the working directory passed to claudia.Start.
+// sink receives every streamed line; pass `newStderrSink(os.Stderr)`
+// for the plain mode and a `*tuiSink` for the bubbletea TUI.
 // allowedNames, if non-nil, restricts which specialists are started.
 // glossary may be nil; when provided, slide messages include glossary preambles.
-func NewSessionPool(meetingID, workDir string, stderr io.Writer, logger *Logger, allowedNames map[string]bool, glossary *GlossaryCache) *SessionPool {
+func NewSessionPool(meetingID, workDir string, sink StreamSink, logger *Logger, allowedNames map[string]bool, glossary *GlossaryCache) *SessionPool {
 	return &SessionPool{
 		meetingID:    meetingID,
 		workDir:      workDir,
 		logger:       logger,
-		stderr:       stderr,
+		sink:         sink,
 		glossary:     glossary,
 		allowedNames: allowedNames,
 		specialists:  make(map[string]*specialistState),
@@ -307,7 +357,7 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 		ExtraArgs: []string{"--append-system-prompt", spec.prompt},
 	})
 	if err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), colorize(colorError, fmt.Sprintf("start error: %v", err)))
+		p.sink.SpecialistLine(spec.name, "", colorize(colorError, fmt.Sprintf("start error: %v", err)))
 		p.logger.LogSpecialistError(spec.name, "start_failed")
 		return
 	}
@@ -319,15 +369,18 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 		agent:     agent,
 	}
 
-	// Wire event handler to stream assistant tokens to stderr, tagged
-	// with both the role and the slide_id of the slide currently being
-	// processed. 🎯T19.4: wrap bare URLs with OSC 8 hyperlinks.
+	// Wire event handler to stream assistant tokens through the sink.
+	// The slide_id of the slide currently being processed is passed
+	// alongside so the TUI sink can group tokens under the right
+	// section header even when the response arrives long after a
+	// newer slide has scrolled past. 🎯T19.4: wrap bare URLs with
+	// OSC 8 hyperlinks.
 	agent.OnEvent(func(ev claudia.Event) {
 		if ev.Type == "assistant" && ev.Text != "" {
 			st.mu.Lock()
 			slideID := st.currentSlideID
 			st.mu.Unlock()
-			fmt.Fprintf(p.stderr, "%s %s\n", tagWithSlide(spec.name, slideID), wrapURLs(ev.Text))
+			p.sink.SpecialistLine(spec.name, slideID, wrapURLs(ev.Text))
 		}
 	})
 
@@ -336,12 +389,12 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 	// Wait for claude to finish booting. This is the contended phase
 	// — the semaphore ensures only one specialist is doing it at a time.
 	if err := agent.WaitReady(ctx); err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), colorize(colorError, fmt.Sprintf("auth/ready error: %v", err)))
+		p.sink.SpecialistLine(spec.name, "", colorize(colorError, fmt.Sprintf("auth/ready error: %v", err)))
 		p.logger.LogSpecialistError(spec.name, "ready_failed")
 		agent.Stop()
 		return
 	}
-	fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), colorize(colorDim, "ready"))
+	p.sink.SpecialistLine(spec.name, "", colorize(colorDim, "ready"))
 
 	// Release the semaphore so the next specialist can begin booting
 	// while this one registers and awaits slide events. The role is
@@ -393,13 +446,13 @@ func (p *SessionPool) processSlide(ctx context.Context, st *specialistState, job
 	}()
 
 	if err := st.agent.Send(job.body); err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tagWithSlide(st.name, job.slideID), colorize(colorError, fmt.Sprintf("send error: %v", err)))
+		p.sink.SpecialistLine(st.name, job.slideID, colorize(colorError, fmt.Sprintf("send error: %v", err)))
 		p.logger.LogSpecialistError(st.name, "send_failed")
 		return
 	}
 
 	if _, err := st.agent.WaitForResponse(ctx); err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tagWithSlide(st.name, job.slideID), colorize(colorError, fmt.Sprintf("response error: %v", err)))
+		p.sink.SpecialistLine(st.name, job.slideID, colorize(colorError, fmt.Sprintf("response error: %v", err)))
 		p.logger.LogSpecialistError(st.name, "response_failed")
 		return
 	}
@@ -493,10 +546,10 @@ func (p *SessionPool) StopAll() {
 
 			if name == "neutral" {
 				// 🎯T15: keep the neutral session alive in tmux.
-				fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorDim, fmt.Sprintf("kept alive (turns: %d)", turns)))
+				p.sink.SpecialistLine(name, "", colorize(colorDim, fmt.Sprintf("kept alive (turns: %d)", turns)))
 			} else {
 				st.agent.Stop()
-				fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorDim, fmt.Sprintf("stopped (turns: %d)", turns)))
+				p.sink.SpecialistLine(name, "", colorize(colorDim, fmt.Sprintf("stopped (turns: %d)", turns)))
 			}
 		}(name, st)
 	}

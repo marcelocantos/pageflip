@@ -226,30 +226,39 @@ func main() {
 		}
 	}
 
-	var pool *SessionPool
-	if *enableAgents {
-		meetingID := MeetingSessionID()
-		allowedNames := ParseSpecialistNames(*specialistsFlag)
-		pool = NewSessionPool(meetingID, *workDir, os.Stderr, logger, allowedNames, glossary)
+	// Build the StreamSink before the pool so the pool can be wired
+	// directly. TUI mode is selected when stderr is a TTY and agents
+	// are enabled; otherwise plain stderr.
+	var sink StreamSink = newStderrSink(os.Stderr)
+	var tuiCleanup func()
+	meetingID := MeetingSessionID()
+	if *enableAgents && stderrIsTTY() {
+		sink, tuiCleanup = startTUI(meetingID)
 	}
 
-	if err := run(context.Background(), os.Stdin, os.Stderr, logger, pool); err != nil {
+	var pool *SessionPool
+	if *enableAgents {
+		allowedNames := ParseSpecialistNames(*specialistsFlag)
+		pool = NewSessionPool(meetingID, *workDir, sink, logger, allowedNames, glossary)
+	}
+
+	if err := run(context.Background(), os.Stdin, sink, logger, pool, tuiCleanup); err != nil {
+		if tuiCleanup != nil {
+			tuiCleanup()
+		}
 		fmt.Fprintln(os.Stderr, "meetcat:", err)
 		os.Exit(1)
 	}
 }
 
-// run processes the slide-event stream from in, writing a summary to
-// summary. pool, if non-nil, receives each validated slide event for
-// specialist analysis. logger may be nil (no-op).
-//
-// When in is a TTY and pool is non-nil, run launches the bubbletea TUI.
-// Otherwise it falls back to line-by-line stderr mode for CI / pipe use.
-func run(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
-	// Single-stream text mode with colour-coded tags. The bubbletea TUI has
-	// been retired — a chronologically-ordered scrollable stream is easier
-	// to copy-paste, grep, and tee, and it doesn't take over the terminal.
-	return runText(ctx, in, summary, logger, pool)
+// run processes the slide-event stream from in, routing every line
+// of output through the supplied sink. pool, if non-nil, receives
+// each validated slide event for specialist analysis. logger may be
+// nil (no-op). tuiCleanup, if non-nil, is invoked from the deferred
+// shutdown path to tear down the bubbletea program before any
+// post-meeting stderr writes.
+func run(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool, tuiCleanup func()) error {
+	return runText(ctx, in, sink, logger, pool, tuiCleanup)
 }
 
 // stderrIsTTY reports whether stderr is connected to an interactive
@@ -264,12 +273,12 @@ func stderrIsTTY() bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// runText is the original line-by-line mode. Used when not on a TTY,
-// when agents are disabled, or in tests. When pool != nil and stderr
-// is a TTY, a bubbletea TUI takes over the terminal and surfaces
-// slide-arrival events in a status bar that updates the moment a
-// slide is validated — independently of any specialist response.
-func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
+// runText reads slide events from in and routes every line of output
+// through sink. tuiCleanup, if non-nil, is the bubbletea teardown
+// function returned by startTUI — invoked from the deferred shutdown
+// before any post-meeting writes to os.Stderr so the alt-screen
+// restore doesn't race with stderr writes.
+func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool, tuiCleanup func()) error {
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
@@ -279,31 +288,20 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 	revisits := newRevisitTracker(5)
 	phashWarned := false
 
-	var onSlide func(slideID string)
-	var tuiCleanup func()
-	if pool != nil && stderrIsTTY() {
-		// Build the TUI before launching agents so the pool's stderr
-		// writer is the TUI sink for every specialist startup line.
-		_, w, cleanup, slideHandler := runWithTUI(pool.meetingID, pool, summary)
-		summary = w
-		tuiCleanup = cleanup
-		onSlide = slideHandler
-	}
-
 	if pool != nil {
 		// Start all specialist agents immediately, in parallel, in a
 		// goroutine — do not wait for the first slide. This gives users
-		// a visible stream of "[skeptic] session started" etc. lines as
-		// soon as meetcat launches, instead of a silent wait.
+		// a visible stream of "[skeptic] ready" etc. lines as soon as
+		// meetcat launches, instead of a silent wait.
 		go pool.StartAll(ctx)
 
 		defer func() {
 			pool.StopAll()
 			ts := pool.TurnSummary()
-			fmt.Fprintf(summary, "%s specialist turn counts:\n",
-				colorize(colorSystem, "meetcat:"))
+			sink.SystemLine(fmt.Sprintf("%s specialist turn counts:",
+				colorize(colorSystem, "meetcat:")))
 			for name, n := range ts {
-				fmt.Fprintf(summary, "  %s %d\n", tag(name), n)
+				sink.SystemLine(fmt.Sprintf("  %s %d", tag(name), n))
 			}
 			// Tear down the TUI before printing post-meeting hints to
 			// the real os.Stderr — otherwise the alt-screen restore
@@ -321,8 +319,8 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 		switch err := dec.Decode(&ev); {
 		case errors.Is(err, io.EOF):
 			logger.LogMeetingEnd(count, 0)
-			fmt.Fprintf(summary, "%s processed %d slide event(s)\n",
-				colorize(colorSystem, "meetcat:"), count)
+			sink.SystemLine(fmt.Sprintf("%s processed %d slide event(s)",
+				colorize(colorSystem, "meetcat:"), count))
 			return nil
 		case err != nil:
 			logger.LogRejected("decode_error")
@@ -344,35 +342,31 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 			front = "-"
 		}
 		if ev.PHash == "" && !phashWarned {
-			fmt.Fprintf(summary, "%s slide event has empty phash — revisit detection disabled for unstamped events. Is pageflip up to date?\n",
-				colorize(colorSystem, "meetcat:"))
+			sink.SystemLine(fmt.Sprintf("%s slide event has empty phash — revisit detection disabled for unstamped events. Is pageflip up to date?",
+				colorize(colorSystem, "meetcat:")))
 			phashWarned = true
 		}
 		revisit, firstIdx := revisits.classify(ev.PHash)
 		if revisit {
-			fmt.Fprintf(
-				summary,
-				"%s [%d] %s (t=%dms, dur=%dms, app=%s) %s %s\n",
+			sink.SystemLine(fmt.Sprintf(
+				"%s [%d] %s (t=%dms, dur=%dms, app=%s) %s %s",
 				colorize(colorDim, "↺"),
 				count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
 				colorize(colorDim, fmt.Sprintf("← slide %d", firstIdx+1)),
-			)
+			))
 			continue
 		}
-		// Status-bar update happens BEFORE writing the section header
-		// so the TUI counter reflects the new slide the same instant
-		// the operator sees it land in the viewport.
-		if onSlide != nil {
-			onSlide(ev.SlideID)
-		}
-		fmt.Fprintln(summary, slideSectionHeader(
+		// OpenSection both updates the TUI status bar AND opens the
+		// section node in the viewport so subsequent specialist lines
+		// for this slide_id group correctly. In stderr mode the
+		// section header just prints in chronological order.
+		sink.OpenSection(ev.SlideID, slideSectionHeader(
 			count, ev.SlideID, front, ev.Path,
 			ev.TStartMs, ev.TEndMs-ev.TStartMs,
 		))
 
-		// Send slide to all specialist agents in parallel. If an agent
-		// hasn't finished starting yet, SendSlide queues internally or
-		// skips gracefully per its own contract.
+		// Send slide to all specialist agents in parallel. SendSlide
+		// returns immediately after queueing per 🎯T23.
 		if pool != nil {
 			pool.SendSlide(ctx, &ev)
 		}

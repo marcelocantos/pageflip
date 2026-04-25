@@ -62,26 +62,6 @@ func tag(name string) string {
 	return fmt.Sprintf("%s[%s]%s", col, name, colorReset)
 }
 
-// tagWithSlide returns `[name | slideID]` so that when a slow specialist
-// finishes a turn for an earlier slide after a newer slide's section
-// header has already scrolled past, the line still attributes itself to
-// the right slide. When slideID is empty (e.g. a startup or shutdown
-// message that isn't tied to a slide), this falls back to the plain
-// `tag()` form.
-func tagWithSlide(name, slideID string) string {
-	if slideID == "" {
-		return tag(name)
-	}
-	if !colorsOn() {
-		return fmt.Sprintf("[%s | %s]", name, slideID)
-	}
-	col, ok := specialistColors[name]
-	if !ok {
-		col = colorDim
-	}
-	return fmt.Sprintf("%s[%s | %s]%s", col, name, slideID, colorReset)
-}
-
 // slideSectionHeader renders the visual separator that opens a new
 // slide's section. It's printed the moment a slide event passes
 // validation in runText, so the operator gets immediate signal that

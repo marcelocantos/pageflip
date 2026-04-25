@@ -27,9 +27,7 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -39,17 +37,33 @@ import (
 
 // tuiSlideArrivedMsg fires the moment runText sees a new validated
 // slide event — before pool.SendSlide is called. It increments the
-// frames counter and resets the age timer so the operator can see
-// the pipeline is moving even when every specialist is silent.
+// frames counter, resets the age timer, and opens a new section in
+// the viewport so subsequent specialist output for this slide_id
+// is grouped underneath the section header rather than appearing
+// chronologically wherever it lands.
 type tuiSlideArrivedMsg struct {
 	slideID string
+	header  string
 	at      time.Time
 }
 
-// tuiLineMsg carries one line of streaming output (specialist tokens,
-// system messages, slide section headers) for the viewport.
+// tuiLineMsg carries one line of streaming output that is NOT
+// attributed to a specific slide — system messages, specialist
+// startup/shutdown lines, glossary preambles. Rendered as a
+// loose-block at its arrival position in the chronological node
+// list (so post-slide lines appear after sections, not above them).
 type tuiLineMsg struct {
 	line string
+}
+
+// tuiAttributedLineMsg carries a specialist line that's tied to a
+// specific slide via its `[role | slide_id]` prefix. Routed into
+// that slide's section so output stays grouped per frame even when
+// a slow specialist completes turns out of order with respect to
+// newer slides.
+type tuiAttributedLineMsg struct {
+	slideID string
+	line    string
 }
 
 // tuiTickMsg refreshes the status-bar age display so a stalled
@@ -72,11 +86,33 @@ func tuiTickCmd() tea.Cmd {
 	})
 }
 
-// tuiModel is the bubbletea model. Lines accumulate in `lines` and
-// are re-rendered into the viewport on each update. The buffer is
-// not pruned: a multi-hour meeting at one slide per minute produces
-// at most a few thousand lines of specialist output, well within
-// memory budget. If that ever becomes an issue, cap the slice.
+// tuiSection holds one slide's grouped output: the section header
+// (a thick visual separator with the slide_id, count, and metadata)
+// plus every specialist line attributed to that slide_id, in
+// arrival order. Sections render in slide-arrival order regardless
+// of when individual specialist output lands, so out-of-order
+// specialist completion stays visually grouped.
+type tuiSection struct {
+	slideID string
+	header  string
+	lines   []string
+}
+
+// tuiNode is one renderable block in the viewport. Either a
+// `tuiSection` (slide group) or a `tuiLooseBlock` (system messages
+// not tied to any slide — startup banners, "ready" lines, "stopped"
+// lines). Nodes render in arrival order so post-slide loose lines
+// appear after the sections they came after.
+type tuiNode struct {
+	section   *tuiSection
+	loose     []string // non-nil iff section is nil
+	looseDone bool     // once a section opens after this loose block, no more lines append
+}
+
+// tuiModel is the bubbletea model. Specialist output is grouped per
+// slide via `nodes` + `slideIdx`; loose lines (system messages, no
+// slide attribution) are appended to the trailing loose-block. The
+// viewport content is re-rendered on every update.
 type tuiModel struct {
 	meetingID   string
 	framesRecv  int
@@ -87,13 +123,84 @@ type tuiModel struct {
 	height   int
 	viewport viewport.Model
 	ready    bool
-	lines    []string
+
+	// nodes is the chronological list of viewport blocks. slideIdx
+	// maps slide_id → index of that slide's section node so attributed
+	// lines can be routed in O(1). Loose lines append to whichever
+	// trailing loose-block is "open" (or create a new one).
+	nodes    []tuiNode
+	slideIdx map[string]int
 
 	quitting bool
 }
 
 func newTUIModel(meetingID string) tuiModel {
-	return tuiModel{meetingID: meetingID}
+	return tuiModel{meetingID: meetingID, slideIdx: map[string]int{}}
+}
+
+// renderNodes flattens the node list into a single string for the
+// viewport. Sections render as: header line, then each attributed
+// line indented two spaces so the visual hierarchy is unmistakable.
+// Loose blocks render their lines verbatim with no indent.
+func (m *tuiModel) renderNodes() string {
+	var b strings.Builder
+	for i, n := range m.nodes {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		switch {
+		case n.section != nil:
+			b.WriteString(n.section.header)
+			for _, l := range n.section.lines {
+				b.WriteByte('\n')
+				b.WriteString("  ")
+				b.WriteString(l)
+			}
+		default:
+			for j, l := range n.loose {
+				if j > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(l)
+			}
+		}
+	}
+	return b.String()
+}
+
+// appendLoose adds a non-attributed line. If the trailing node is an
+// open loose block, append; otherwise start a new loose block.
+func (m *tuiModel) appendLoose(line string) {
+	if n := len(m.nodes); n > 0 && m.nodes[n-1].section == nil && !m.nodes[n-1].looseDone {
+		m.nodes[n-1].loose = append(m.nodes[n-1].loose, line)
+		return
+	}
+	m.nodes = append(m.nodes, tuiNode{loose: []string{line}})
+}
+
+// openSection appends a new slide section. Any preceding loose block
+// is "closed" so future loose lines start a fresh block below this
+// section instead of appending to the now-stale block above.
+func (m *tuiModel) openSection(slideID, header string) {
+	if n := len(m.nodes); n > 0 && m.nodes[n-1].section == nil {
+		m.nodes[n-1].looseDone = true
+	}
+	sec := &tuiSection{slideID: slideID, header: header}
+	m.slideIdx[slideID] = len(m.nodes)
+	m.nodes = append(m.nodes, tuiNode{section: sec})
+}
+
+// appendAttributed routes a specialist line into its slide's section.
+// If the slide hasn't been opened yet (race: agent emits before the
+// decode loop fires the slide-arrived msg), fall back to a loose
+// block so the line isn't lost.
+func (m *tuiModel) appendAttributed(slideID, line string) {
+	i, ok := m.slideIdx[slideID]
+	if !ok {
+		m.appendLoose(line)
+		return
+	}
+	m.nodes[i].section.lines = append(m.nodes[i].section.lines, line)
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -126,13 +233,20 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.SetContent(strings.Join(m.lines, "\n"))
+		m.viewport.SetContent(m.renderNodes())
 		m.viewport.GotoBottom()
 
 	case tuiLineMsg:
-		m.lines = append(m.lines, msg.line)
+		m.appendLoose(msg.line)
 		if m.ready {
-			m.viewport.SetContent(strings.Join(m.lines, "\n"))
+			m.viewport.SetContent(m.renderNodes())
+			m.viewport.GotoBottom()
+		}
+
+	case tuiAttributedLineMsg:
+		m.appendAttributed(msg.slideID, msg.line)
+		if m.ready {
+			m.viewport.SetContent(m.renderNodes())
 			m.viewport.GotoBottom()
 		}
 
@@ -140,6 +254,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.framesRecv++
 		m.lastSlide = msg.slideID
 		m.lastFrameAt = msg.at
+		m.openSection(msg.slideID, msg.header)
+		if m.ready {
+			m.viewport.SetContent(m.renderNodes())
+			m.viewport.GotoBottom()
+		}
 
 	case tuiTickMsg:
 		return m, tuiTickCmd()
@@ -180,80 +299,44 @@ func (m tuiModel) View() string {
 	return statusBarStyle.Render(bar) + "\n" + m.viewport.View()
 }
 
-// tuiWriter is the io.Writer adapter that pumps streaming output
-// (pool stderr, summary writes) into the TUI viewport. Each call's
-// payload is split on newlines so a single fmt.Fprintf with embedded
-// "\n" produces multiple viewport lines, the way the operator
-// expects from a stream-of-lines mental model.
-type tuiWriter struct {
+// tuiSink is the StreamSink implementation that routes lines into a
+// running bubbletea program. Specialist lines tied to a slide_id
+// become tuiAttributedLineMsg so the model can park them under the
+// matching section; lines without slide attribution become tuiLineMsg
+// (loose blocks). OpenSection fires tuiSlideArrivedMsg which both
+// updates the status bar and creates the section node.
+type tuiSink struct {
 	prog *tea.Program
-
-	mu      sync.Mutex
-	pending strings.Builder
 }
 
-func newTUIWriter(p *tea.Program) *tuiWriter {
-	return &tuiWriter{prog: p}
+func newTUISink(p *tea.Program) *tuiSink { return &tuiSink{prog: p} }
+
+func (s *tuiSink) OpenSection(slideID, header string) {
+	s.prog.Send(tuiSlideArrivedMsg{slideID: slideID, header: header, at: time.Now()})
 }
 
-func (w *tuiWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.pending.Write(p)
-	buf := w.pending.String()
-	idx := strings.LastIndexByte(buf, '\n')
-	if idx < 0 {
-		// No complete line yet — keep buffering.
-		return len(p), nil
-	}
-	complete := buf[:idx]
-	tail := buf[idx+1:]
-	w.pending.Reset()
-	w.pending.WriteString(tail)
-	for _, line := range strings.Split(complete, "\n") {
-		w.prog.Send(tuiLineMsg{line: line})
-	}
-	return len(p), nil
-}
-
-// flush forwards any unterminated pending text as a final line. Call
-// after the TUI exits if there's a chance of a tail without a newline
-// (rare in this codebase — every print site uses Fprintln/%s\n).
-func (w *tuiWriter) flush() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.pending.Len() == 0 {
+func (s *tuiSink) SpecialistLine(role, slideID, text string) {
+	line := tag(role) + " " + text
+	if slideID == "" {
+		s.prog.Send(tuiLineMsg{line: line})
 		return
 	}
-	w.prog.Send(tuiLineMsg{line: w.pending.String()})
-	w.pending.Reset()
+	s.prog.Send(tuiAttributedLineMsg{slideID: slideID, line: line})
 }
 
-// runWithTUI wraps a streaming run with a bubbletea TUI. The pool's
-// stderr writer is replaced with a tuiWriter for the TUI's lifetime
-// so specialist output flows into the viewport; the caller's
-// `summary` is also redirected so slide section headers and
-// end-of-meeting turn counts land in the same place.
-//
-// onSlide(ev) is invoked from the decode loop the moment a slide is
-// validated, *before* pool.SendSlide. The TUI status bar receives a
-// tuiSlideArrivedMsg with the slide_id and current time so the age
-// counter can start from zero on every arrival.
-//
-// Returns a cleanup function that quits the TUI and waits for it to
-// exit. The cleanup must be called before any post-meeting writes
-// to os.Stderr (otherwise the alt-screen restoration races the
-// stderr write and the operator sees garbled output).
-func runWithTUI(meetingID string, pool *SessionPool, summary io.Writer) (
-	*tea.Program, io.Writer, func(), func(slideID string),
-) {
+func (s *tuiSink) SystemLine(text string) {
+	s.prog.Send(tuiLineMsg{line: text})
+}
+
+// startTUI launches a bubbletea program in a goroutine and returns a
+// sink that routes streaming output into it, plus a cleanup function
+// that quits the TUI and blocks until the alt-screen has been
+// restored. The cleanup must run before any subsequent writes to
+// os.Stderr — otherwise the screen-restore races the writes and the
+// operator sees garbled output.
+func startTUI(meetingID string) (StreamSink, func()) {
 	model := newTUIModel(meetingID)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
-	writer := newTUIWriter(prog)
-
-	if pool != nil {
-		pool.stderr = writer
-	}
 
 	done := make(chan struct{})
 	go func() {
@@ -264,10 +347,6 @@ func runWithTUI(meetingID string, pool *SessionPool, summary io.Writer) (
 	cleanup := func() {
 		prog.Send(tuiQuitMsg{})
 		<-done
-		writer.flush()
 	}
-	onSlide := func(slideID string) {
-		prog.Send(tuiSlideArrivedMsg{slideID: slideID, at: time.Now()})
-	}
-	return prog, writer, cleanup, onSlide
+	return newTUISink(prog), cleanup
 }

@@ -13,7 +13,7 @@ import (
 func TestRunMinimalEvent(t *testing.T) {
 	in := strings.NewReader(`{"slide_id":"s1","path":"/tmp/s1.png","t_start_ms":100,"t_end_ms":120}` + "\n")
 	var out bytes.Buffer
-	if err := run(context.Background(), in, &out, nil, nil); err != nil {
+	if err := run(context.Background(), in, newStderrSink(&out), nil, nil, nil); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 	if !strings.Contains(out.String(), "s1") {
@@ -30,7 +30,7 @@ func TestRunRichEvent(t *testing.T) {
 		`"frontmost_app":"Teams"}`
 	in := strings.NewReader(evt + "\n")
 	var out bytes.Buffer
-	if err := run(context.Background(), in, &out, nil, nil); err != nil {
+	if err := run(context.Background(), in, newStderrSink(&out), nil, nil, nil); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 	if !strings.Contains(out.String(), "app=Teams") {
@@ -41,7 +41,7 @@ func TestRunRichEvent(t *testing.T) {
 func TestRunRejectsMissingSlideID(t *testing.T) {
 	in := strings.NewReader(`{"path":"/p.png","t_start_ms":0,"t_end_ms":1}` + "\n")
 	var out bytes.Buffer
-	if err := run(context.Background(), in, &out, nil, nil); err == nil {
+	if err := run(context.Background(), in, newStderrSink(&out), nil, nil, nil); err == nil {
 		t.Fatalf("expected error on missing slide_id")
 	} else if !strings.Contains(err.Error(), "slide_id") {
 		t.Fatalf("error did not mention slide_id: %v", err)
@@ -51,7 +51,7 @@ func TestRunRejectsMissingSlideID(t *testing.T) {
 func TestRunRejectsTimeInversion(t *testing.T) {
 	in := strings.NewReader(`{"slide_id":"s","path":"/p","t_start_ms":100,"t_end_ms":50}` + "\n")
 	var out bytes.Buffer
-	if err := run(context.Background(), in, &out, nil, nil); err == nil {
+	if err := run(context.Background(), in, newStderrSink(&out), nil, nil, nil); err == nil {
 		t.Fatalf("expected error on inverted timestamps")
 	}
 }
@@ -64,7 +64,7 @@ func TestRunMultiEvent(t *testing.T) {
 	}
 	in := strings.NewReader(strings.Join(events, "\n") + "\n")
 	var out bytes.Buffer
-	if err := run(context.Background(), in, &out, nil, nil); err != nil {
+	if err := run(context.Background(), in, newStderrSink(&out), nil, nil, nil); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 	if !strings.Contains(out.String(), "processed 3") {
@@ -77,7 +77,7 @@ func TestRunWithLogger(t *testing.T) {
 	var summary bytes.Buffer
 	var logBuf bytes.Buffer
 	logger := &Logger{w: &logBuf}
-	if err := run(context.Background(), in, &summary, logger, nil); err != nil {
+	if err := run(context.Background(), in, newStderrSink(&summary), logger, nil, nil); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
 	if !strings.Contains(logBuf.String(), "received") {
