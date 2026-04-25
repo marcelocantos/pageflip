@@ -59,6 +59,14 @@ function ensureSlideCard(slideID, imageURL) {
     img.alt = `slide ${slideID}`;
     img.src = imageURL;
     imgWrap.appendChild(img);
+    // Floating large-preview that appears on hover. Same src as the
+    // thumbnail (browser cache-hits the second decode), shown via
+    // CSS `.slide-image:hover .preview`.
+    const preview = document.createElement('img');
+    preview.className = 'preview';
+    preview.alt = '';
+    preview.src = imageURL;
+    imgWrap.appendChild(preview);
   }
 
   const analysis = document.createElement('div');

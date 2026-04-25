@@ -104,6 +104,28 @@ main#slides {
   cursor: zoom-in;
 }
 
+/* Floating large preview shown while hovering the thumbnail.
+   pointer-events:none so the preview itself doesn't capture the
+   hover or interfere with clicking the thumbnail. */
+.slide-card .slide-image .preview {
+  display: none;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 90vw;
+  max-height: 85vh;
+  z-index: 100;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.75);
+  pointer-events: none;
+  background: #000;
+}
+.slide-card .slide-image:hover .preview {
+  display: block;
+}
+
 .slide-card .analysis {
   padding: 0.6rem 1rem;
   display: flex;
