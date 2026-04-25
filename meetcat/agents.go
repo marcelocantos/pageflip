@@ -209,8 +209,20 @@ type StreamSink interface {
 
 	// SpecialistLine emits one line of specialist output. slideID
 	// names the slide the specialist is currently processing, or ""
-	// for lifecycle messages (startup errors, "ready", "stopped").
+	// for lifecycle messages (startup errors, etc.).
 	SpecialistLine(role, slideID, text string)
+
+	// SpecialistReady signals that a specialist has finished booting
+	// and is now accepting slides. The TUI sink uses this to flip
+	// the per-specialist icon in the status bar from booting to
+	// active; the stderr sink just prints "[role] ready".
+	SpecialistReady(role string)
+
+	// SpecialistStopped signals that a specialist has shut down
+	// after processing `turns` slides. For neutral, the underlying
+	// tmux session is kept alive but the specialist no longer
+	// accepts work — the TUI represents both as "stopped".
+	SpecialistStopped(role string, turns int)
 
 	// SystemLine emits one line that's not attributed to a specialist
 	// (revisits, EOF summary, phash warnings, end-of-meeting tallies).
@@ -237,6 +249,18 @@ func (s *stderrSink) OpenSection(_, header string) {
 
 func (s *stderrSink) SpecialistLine(role, _, text string) {
 	fmt.Fprintf(s.w, "%s %s\n", tag(role), text)
+}
+
+func (s *stderrSink) SpecialistReady(role string) {
+	fmt.Fprintf(s.w, "%s %s\n", tag(role), colorize(colorDim, "ready"))
+}
+
+func (s *stderrSink) SpecialistStopped(role string, turns int) {
+	suffix := fmt.Sprintf("stopped (turns: %d)", turns)
+	if role == "neutral" {
+		suffix = fmt.Sprintf("kept alive (turns: %d)", turns)
+	}
+	fmt.Fprintf(s.w, "%s %s\n", tag(role), colorize(colorDim, suffix))
 }
 
 func (s *stderrSink) SystemLine(text string) {
@@ -399,7 +423,7 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 		agent.Stop()
 		return
 	}
-	p.sink.SpecialistLine(spec.name, "", colorize(colorDim, "ready"))
+	p.sink.SpecialistReady(spec.name)
 
 	// Release the semaphore so the next specialist can begin booting
 	// while this one registers and awaits slide events. The role is
@@ -549,13 +573,14 @@ func (p *SessionPool) StopAll() {
 			turns := st.turnCount
 			st.mu.Unlock()
 
-			if name == "neutral" {
+			if name != "neutral" {
 				// 🎯T15: keep the neutral session alive in tmux.
-				p.sink.SpecialistLine(name, "", colorize(colorDim, fmt.Sprintf("kept alive (turns: %d)", turns)))
-			} else {
 				st.agent.Stop()
-				p.sink.SpecialistLine(name, "", colorize(colorDim, fmt.Sprintf("stopped (turns: %d)", turns)))
 			}
+			// Both branches feed the status bar; "neutral" is implicit
+			// in stderrSink which renders "kept alive" instead of
+			// "stopped" for that role.
+			p.sink.SpecialistStopped(name, turns)
 		}(name, st)
 	}
 	wg.Wait()

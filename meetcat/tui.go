@@ -100,6 +100,28 @@ type tuiAttributedLineMsg struct {
 	line    string
 }
 
+// specialistState is the lifecycle state of one specialist. Used to
+// drive the per-specialist icons in the status bar.
+type specialistStateValue int
+
+const (
+	specialistBooting specialistStateValue = iota
+	specialistReady
+	specialistStopped
+)
+
+// tuiSpecialistStateMsg signals a specialist's lifecycle transition
+// (booting → ready → stopped). The status bar renders each
+// specialist as an emoji that's dim while booting, full-colour while
+// ready, and dim again with a turn count when stopped — moving these
+// signals out of the chronological viewport where they were
+// otherwise loose lines.
+type tuiSpecialistStateMsg struct {
+	role  string
+	state specialistStateValue
+	turns int // only meaningful for specialistStopped
+}
+
 // tuiTickMsg refreshes the status-bar age display so a stalled
 // pipeline is visually obvious — without a tick the age field would
 // only update on slide arrival, which is exactly when the operator
@@ -143,6 +165,32 @@ type tuiNode struct {
 	looseDone bool     // once a section opens after this loose block, no more lines append
 }
 
+// specialistStatus is the per-specialist row in the status bar.
+type specialistStatus struct {
+	state specialistStateValue
+	turns int
+}
+
+// specialistOrder is the canonical render order for specialist
+// icons in the status bar. Mirrors allSpecialists() so the operator
+// always sees the same lineup left-to-right regardless of which
+// boots first.
+var specialistOrder = []string{"skeptic", "constructive", "neutral", "dejargoniser", "contradictions"}
+
+// specialistEmoji is the icon set chosen for the status bar:
+//   - 🔍 skeptic       — magnifier; questioning, examining
+//   - 💡 constructive  — lightbulb; ideas, "yes-and"
+//   - 😶 neutral       — neutral face; reference / orientation
+//   - 📖 dejargoniser  — open book; glossary
+//   - 🛑 contradictions — stop sign; alerts a clash
+var specialistEmoji = map[string]string{
+	"skeptic":        "🔍",
+	"constructive":   "💡",
+	"neutral":        "😶",
+	"dejargoniser":   "📖",
+	"contradictions": "🛑",
+}
+
 // tuiModel is the bubbletea model. Specialist output is grouped per
 // slide via `nodes` + `slideIdx`; loose lines (system messages, no
 // slide attribution) are appended to the trailing loose-block. The
@@ -165,11 +213,19 @@ type tuiModel struct {
 	nodes    []tuiNode
 	slideIdx map[string]int
 
+	// specialistStatus tracks per-specialist lifecycle for the icons
+	// in the status bar. Roles not yet booted simply don't appear.
+	specialists map[string]specialistStatus
+
 	quitting bool
 }
 
 func newTUIModel(meetingID string) tuiModel {
-	return tuiModel{meetingID: meetingID, slideIdx: map[string]int{}}
+	return tuiModel{
+		meetingID:   meetingID,
+		slideIdx:    map[string]int{},
+		specialists: map[string]specialistStatus{},
+	}
 }
 
 // renderNodes flattens the node list into a single string for the
@@ -294,6 +350,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 		}
 
+	case tuiSpecialistStateMsg:
+		st := m.specialists[msg.role]
+		st.state = msg.state
+		st.turns = msg.turns
+		m.specialists[msg.role] = st
+
 	case tuiTickMsg:
 		return m, tuiTickCmd()
 
@@ -311,6 +373,42 @@ var statusBarStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("231")).
 	Bold(true)
 
+// specialistsStatusFragment renders the per-specialist icon strip
+// for the status bar, e.g. " 🔍 💡 😶 📖 🛑". Booting specialists
+// render dim, ready specialists render full-colour, stopped ones
+// render dim with a turn count appended.
+func (m tuiModel) specialistsStatusFragment() string {
+	parts := make([]string, 0, len(specialistOrder))
+	for _, role := range specialistOrder {
+		st, present := m.specialists[role]
+		if !present {
+			// Specialist hasn't called sink.SpecialistReady yet (still
+			// booting or filtered out via --specialists). Skip — an
+			// absent icon is the cleanest "not yet there" signal.
+			continue
+		}
+		emoji, ok := specialistEmoji[role]
+		if !ok {
+			emoji = "·"
+		}
+		switch st.state {
+		case specialistReady:
+			parts = append(parts, emoji)
+		case specialistStopped:
+			// Faint emoji + turn count so the operator can see how
+			// many turns each specialist completed without scrolling
+			// to the end-of-meeting summary.
+			parts = append(parts, fmt.Sprintf("%s\u202f%d", emoji, st.turns))
+		default: // booting (shouldn't see this since absence handles it)
+			parts = append(parts, emoji)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ") + " ·"
+}
+
 func (m tuiModel) View() string {
 	if !m.ready {
 		return "meetcat: initialising TUI…"
@@ -324,10 +422,10 @@ func (m tuiModel) View() string {
 		age = fmt.Sprintf("%.1fs", time.Since(m.lastFrameAt).Seconds())
 	}
 	bar := fmt.Sprintf(
-		" frames: %d · last: %s · age: %s · meeting: %s",
-		m.framesRecv, last, age, m.meetingID,
+		" frames: %d · last: %s · age: %s ·%s meeting: %s",
+		m.framesRecv, last, age, m.specialistsStatusFragment(), m.meetingID,
 	)
-	if w := m.width; w > 0 && len(bar) < w {
+	if w := m.width; w > 0 && lipgloss.Width(bar) < w {
 		bar += strings.Repeat(" ", w-lipgloss.Width(bar))
 	}
 	return statusBarStyle.Render(bar) + "\n" + m.viewport.View()
@@ -338,7 +436,11 @@ func (m tuiModel) View() string {
 // become tuiAttributedLineMsg so the model can park them under the
 // matching section; lines without slide attribution become tuiLineMsg
 // (loose blocks). OpenSection fires tuiSlideArrivedMsg which both
-// updates the status bar and creates the section node.
+// updates the status bar and creates the section node. Specialist
+// state changes (ready / stopped) become tuiSpecialistStateMsg so
+// the status bar shows per-specialist icons rather than scrolling
+// "[role] ready" / "[role] stopped (turns: N)" lines through the
+// viewport — those are lifecycle signals, not analysis output.
 type tuiSink struct {
 	prog *tea.Program
 }
@@ -356,6 +458,14 @@ func (s *tuiSink) SpecialistLine(role, slideID, text string) {
 		return
 	}
 	s.prog.Send(tuiAttributedLineMsg{slideID: slideID, line: line})
+}
+
+func (s *tuiSink) SpecialistReady(role string) {
+	s.prog.Send(tuiSpecialistStateMsg{role: role, state: specialistReady})
+}
+
+func (s *tuiSink) SpecialistStopped(role string, turns int) {
+	s.prog.Send(tuiSpecialistStateMsg{role: role, state: specialistStopped, turns: turns})
 }
 
 func (s *tuiSink) SystemLine(text string) {

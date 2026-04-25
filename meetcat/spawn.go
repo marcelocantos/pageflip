@@ -63,7 +63,11 @@ func spawnPageflip(ctx context.Context, sink StreamSink, args []string) (io.Read
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			sink.SystemLine(colorize(colorDim, "pageflip: "+scanner.Text()))
+			// pageflip self-prefixes its messages with "pageflip:" so
+			// don't add a second one — just dim the line so it sits
+			// quietly in the viewport without competing with the
+			// specialist output.
+			sink.SystemLine(colorize(colorDim, scanner.Text()))
 		}
 	}()
 
