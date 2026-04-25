@@ -16,3 +16,6 @@ Cargo.lock.bak
 
 # pageflip output
 pageflip-*/
+
+# meetcat artifact directories (one per meeting; never to be committed)
+meetcat-*/
