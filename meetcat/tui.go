@@ -367,7 +367,24 @@ func (m *tuiModel) renderMarkdown(role, text string) string {
 	if err != nil {
 		return formatWithGutter(role, text)
 	}
-	return formatWithGutter(role, strings.TrimRight(out, "\n"))
+	return formatWithGutter(role, trimBlankLines(out))
+}
+
+// trimBlankLines strips lines that are entirely whitespace from the
+// top and bottom of `s`. Glamour's default style adds a top/bottom
+// margin which would otherwise leave the emoji gutter sitting alone
+// on a blank line above the actual content.
+func trimBlankLines(s string) string {
+	lines := strings.Split(s, "\n")
+	start := 0
+	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	end := len(lines)
+	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	return strings.Join(lines[start:end], "\n")
 }
 
 // formatWithGutter prepends the specialist's emoji + a space to the
