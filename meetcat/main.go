@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -269,18 +271,23 @@ func runMeeting(cfg meetingConfig) error {
 		}
 	}
 
-	// TUI sink takes the terminal in alt-screen mode when stderr is a
-	// TTY and agents are enabled; otherwise stderr stays plain text.
+	// Web mode: when agents are enabled and stderr is a TTY, meetcat
+	// serves a local HTTP/SSE page and opens it in the browser. The
+	// page renders specialist output as proper markdown and embeds
+	// each slide's PNG inline next to the analysis — neither of
+	// which the terminal could do well.
 	var sink StreamSink = newStderrSink(os.Stderr)
-	var tuiCleanup func()
-	var tuiDone <-chan struct{}
+	var webShutdown func()
 	if cfg.EnableAgents && stderrIsTTY() {
-		s, c, d := startTUI(cfg.MeetingID)
-		sink, tuiCleanup, tuiDone = s, c, d
-		// Reroute the global slog default through the TUI sink and
-		// suppress INFO so claudia's per-agent startup chatter
-		// doesn't bypass the alt-screen and shred the viewport.
-		installSlogIntoSink(sink)
+		h := newHub()
+		url, shutdown, err := startWebServer(cfg.MeetingID, cfg.WorkDir, h)
+		if err != nil {
+			return fmt.Errorf("start web server: %w", err)
+		}
+		sink = newWebSink(h)
+		webShutdown = shutdown
+		fmt.Fprintf(os.Stderr, "meetcat: open %s in your browser (Ctrl-C to stop)\n", url)
+		_ = openInBrowser(url)
 	}
 
 	// Persist the manifest as early as possible so an immediate
@@ -319,17 +326,21 @@ func runMeeting(cfg meetingConfig) error {
 		pageflipCleanup = cleanup
 	}
 
-	// User-initiated TUI quit (q / Ctrl-C) propagates to a process
-	// shutdown: cancel the context (SIGTERMs pageflip via cmd.Cancel
-	// so its stdout closes and our decoder hits EOF) and close stdin
-	// as a fallback for the --no-spawn case.
-	if tuiDone != nil {
-		go func() {
-			<-tuiDone
+	// Terminal Ctrl-C propagates to a process shutdown: cancel the
+	// context (SIGTERMs pageflip via cmd.Cancel so its stdout closes
+	// and our decoder hits EOF) and close stdin as a fallback for
+	// the --no-spawn case. The web tab will see the SSE connection
+	// drop and stop receiving events.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sigCh:
 			cancel()
 			_ = os.Stdin.Close()
-		}()
-	}
+		case <-ctx.Done():
+		}
+	}()
 
 	var pool *SessionPool
 	if cfg.EnableAgents {
@@ -338,14 +349,14 @@ func runMeeting(cfg meetingConfig) error {
 
 	runErr := run(ctx, eventStream, sink, cfg.Logger, pool)
 
-	// Shutdown order: TUI tears down the alt-screen first so the
-	// post-meeting writes to os.Stderr (session IDs, resume hint)
-	// aren't garbled by a screen-restore race.
-	if tuiCleanup != nil {
-		tuiCleanup()
-	}
+	// Shutdown: kill pageflip, then close the web server (stops
+	// SSE), then the post-meeting writes (session IDs, resume hint)
+	// land on the real stderr.
 	if pageflipCleanup != nil {
 		pageflipCleanup()
+	}
+	if webShutdown != nil {
+		webShutdown()
 	}
 	if pool != nil {
 		writeSessionIDsIfPossible(pool, os.Stderr)
