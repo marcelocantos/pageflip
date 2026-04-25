@@ -217,19 +217,20 @@ func main() {
 	}
 
 	cfg := meetingConfig{
-		MeetingID:         MeetingSessionID(),
-		WorkDir:           *workDir,
-		GlossaryCache:     *glossaryCachePath,
-		AllowedNames:      ParseSpecialistNames(*specialistsFlag),
-		EnableAgents:      enableAgents,
-		NoSpawn:           *noSpawn,
+		MeetingID:     MeetingSessionID(),
+		WorkDir:       *workDir,
+		GlossaryCache: *glossaryCachePath,
+		AllowedNames:  ParseSpecialistNames(*specialistsFlag),
+		EnableAgents:  enableAgents,
+		NoSpawn:       *noSpawn,
 		Pageflip: PageflipArgs{
 			Region:      *regionFlag,
 			Window:      *windowFlag,
 			WindowTitle: *windowTitleFlag,
 			WindowID:    *windowIDFlag,
 		},
-		Logger: logger,
+		Logger:      logger,
+		OpenBrowser: true,
 	}
 
 	if err := runMeeting(cfg); err != nil {
@@ -251,6 +252,14 @@ type meetingConfig struct {
 	NoSpawn       bool
 	Pageflip      PageflipArgs
 	Logger        *Logger
+
+	// OpenBrowser controls whether runMeeting auto-opens the user's
+	// default browser at the meetcat web URL. Fresh meetings set it
+	// true; resume sets it false because the operator's existing
+	// browser tab is still open from the prior run and will auto-
+	// reconnect via EventSource — opening a new tab would compete
+	// with that one for focus.
+	OpenBrowser bool
 }
 
 // runMeeting wires up the TUI, spawns pageflip (or reads stdin),
@@ -291,7 +300,9 @@ func runMeeting(cfg meetingConfig) error {
 		sink = newWebSink(h, absWork)
 		webShutdown = shutdown
 		fmt.Fprintf(os.Stderr, "meetcat: open %s in your browser (Ctrl-C to stop)\n", url)
-		_ = openInBrowser(url)
+		if cfg.OpenBrowser {
+			_ = openInBrowser(url)
+		}
 	}
 
 	// Persist the manifest as early as possible so an immediate
