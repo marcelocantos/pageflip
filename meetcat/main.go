@@ -252,8 +252,23 @@ func run(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, p
 	return runText(ctx, in, summary, logger, pool)
 }
 
+// stderrIsTTY reports whether stderr is connected to an interactive
+// terminal. Used to decide whether to launch the bubbletea TUI; piped
+// stderr (CI, `meetcat 2>log`, tests) falls back to the streaming
+// path so output stays grep- and tee-friendly.
+func stderrIsTTY() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
 // runText is the original line-by-line mode. Used when not on a TTY,
-// when agents are disabled, or in tests.
+// when agents are disabled, or in tests. When pool != nil and stderr
+// is a TTY, a bubbletea TUI takes over the terminal and surfaces
+// slide-arrival events in a status bar that updates the moment a
+// slide is validated — independently of any specialist response.
 func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
@@ -264,6 +279,17 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 	revisits := newRevisitTracker(5)
 	phashWarned := false
 
+	var onSlide func(slideID string)
+	var tuiCleanup func()
+	if pool != nil && stderrIsTTY() {
+		// Build the TUI before launching agents so the pool's stderr
+		// writer is the TUI sink for every specialist startup line.
+		_, w, cleanup, slideHandler := runWithTUI(pool.meetingID, pool, summary)
+		summary = w
+		tuiCleanup = cleanup
+		onSlide = slideHandler
+	}
+
 	if pool != nil {
 		// Start all specialist agents immediately, in parallel, in a
 		// goroutine — do not wait for the first slide. This gives users
@@ -273,14 +299,20 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 
 		defer func() {
 			pool.StopAll()
-			writeSessionIDsIfPossible(pool, os.Stderr)
-			printNeutralAttachHint(pool, os.Stderr)
 			ts := pool.TurnSummary()
 			fmt.Fprintf(summary, "%s specialist turn counts:\n",
 				colorize(colorSystem, "meetcat:"))
 			for name, n := range ts {
 				fmt.Fprintf(summary, "  %s %d\n", tag(name), n)
 			}
+			// Tear down the TUI before printing post-meeting hints to
+			// the real os.Stderr — otherwise the alt-screen restore
+			// races the writes and the operator sees garbled output.
+			if tuiCleanup != nil {
+				tuiCleanup()
+			}
+			writeSessionIDsIfPossible(pool, os.Stderr)
+			printNeutralAttachHint(pool, os.Stderr)
 		}()
 	}
 
@@ -326,6 +358,12 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 				colorize(colorDim, fmt.Sprintf("← slide %d", firstIdx+1)),
 			)
 			continue
+		}
+		// Status-bar update happens BEFORE writing the section header
+		// so the TUI counter reflects the new slide the same instant
+		// the operator sees it land in the viewport.
+		if onSlide != nil {
+			onSlide(ev.SlideID)
 		}
 		fmt.Fprintln(summary, slideSectionHeader(
 			count, ev.SlideID, front, ev.Path,
