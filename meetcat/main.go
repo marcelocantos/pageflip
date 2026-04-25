@@ -22,6 +22,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 )
 
 const version = "0.0.1"
@@ -129,15 +131,16 @@ func writeSessionIDsIfPossible(pool *SessionPool, w io.Writer) {
 	}
 }
 
-// printNeutralAttachHint prints the command to re-attach to the neutral
-// session on stderr so the user knows how to resume (🎯T15).
-func printNeutralAttachHint(pool *SessionPool, w io.Writer) {
-	neutral := pool.NeutralAgent()
-	if neutral == nil {
+// printResumeHint tells the operator the one command they need to
+// pick up where the meeting left off. Every specialist's Claude Code
+// session is persisted by JSONL, so resume reconstructs all five
+// from a single meeting ID.
+func printResumeHint(pool *SessionPool, w io.Writer) {
+	if pool == nil {
 		return
 	}
-	fmt.Fprintf(w, "\nmeetcat: neutral session still alive — to resume:\n")
-	fmt.Fprintf(w, "  meetcat attach --meeting %s neutral\n", pool.meetingID)
+	fmt.Fprintf(w, "\nmeetcat: meeting saved. To resume:\n")
+	fmt.Fprintf(w, "  meetcat resume %s\n", pool.meetingID)
 }
 
 func main() {
@@ -157,26 +160,16 @@ func main() {
 			runGlossarySubcommand(os.Args[2:])
 			return
 		case "attach":
-			attachFlags := flag.NewFlagSet("attach", flag.ExitOnError)
-			meetingID := attachFlags.String("meeting", "", "Meeting session ID (meetcat-<timestamp>).")
-			if err := attachFlags.Parse(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "meetcat attach:", err)
-				os.Exit(2)
-			}
-			args := attachFlags.Args()
-			if len(args) != 1 {
-				fmt.Fprintln(os.Stderr, "usage: meetcat attach [--meeting <id>] <specialist>")
-				os.Exit(2)
-			}
-			specialist := args[0]
-			if *meetingID == "" {
-				fmt.Fprintln(os.Stderr, "meetcat attach: --meeting <id> is required")
-				os.Exit(2)
-			}
-			sessID := specialistSessionID(*meetingID, specialist)
-			fmt.Printf("# Attach to specialist %q (session: %s)\n", specialist, sessID)
-			fmt.Printf("# Start meetcat, then run:\n")
-			fmt.Printf("tmux -L claudia attach-session -t %s\n", sessID)
+			// Legacy attach printed a `tmux ... attach` command that
+			// only worked while neutral was kept alive. With every
+			// specialist torn down at meeting end (and resume taking
+			// over via JSONL persistence), tmux attach is no longer
+			// the right primitive. Print a clear redirect.
+			fmt.Fprintln(os.Stderr, "meetcat attach is deprecated — use `meetcat resume <meeting-id>`")
+			fmt.Fprintln(os.Stderr, "(All specialists' sessions persist via Claude Code JSONL; resume re-spawns them with their accumulated context.)")
+			os.Exit(2)
+		case "resume":
+			runResume(os.Args[2:])
 			return
 		}
 	}
@@ -221,14 +214,58 @@ func main() {
 		defer f.Close()
 	}
 
-	// Load glossary cache (best-effort; errors are printed but don't abort).
+	cfg := meetingConfig{
+		MeetingID:         MeetingSessionID(),
+		WorkDir:           *workDir,
+		GlossaryCache:     *glossaryCachePath,
+		AllowedNames:      ParseSpecialistNames(*specialistsFlag),
+		EnableAgents:      enableAgents,
+		NoSpawn:           *noSpawn,
+		Pageflip: PageflipArgs{
+			Region:      *regionFlag,
+			Window:      *windowFlag,
+			WindowTitle: *windowTitleFlag,
+			WindowID:    *windowIDFlag,
+		},
+		Logger: logger,
+	}
+
+	if err := runMeeting(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat:", err)
+		os.Exit(1)
+	}
+}
+
+// meetingConfig is the resolved configuration for one meeting run.
+// Both the fresh-meeting path (main) and the resume path (runResume)
+// build it and hand it to runMeeting, which owns the TUI / pageflip /
+// pool lifecycle.
+type meetingConfig struct {
+	MeetingID     string
+	WorkDir       string
+	GlossaryCache string
+	AllowedNames  map[string]bool
+	EnableAgents  bool
+	NoSpawn       bool
+	Pageflip      PageflipArgs
+	Logger        *Logger
+}
+
+// runMeeting wires up the TUI, spawns pageflip (or reads stdin),
+// boots the specialist pool, drives the slide-event decode loop, and
+// shuts everything down cleanly. The same code path serves a fresh
+// meeting and a resumed one — only the meeting ID + per-specialist
+// JSONL persistence make resume "do the right thing" via claudia's
+// auto-detect.
+func runMeeting(cfg meetingConfig) error {
+	// Load glossary cache (best-effort; errors are noted but don't abort).
 	var glossary *GlossaryCache
-	if *glossaryCachePath != "" {
-		var err error
-		glossary, err = NewGlossaryCache(*glossaryCachePath)
+	if cfg.GlossaryCache != "" {
+		g, err := NewGlossaryCache(cfg.GlossaryCache)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "meetcat: glossary cache: %v (continuing without)\n", err)
-			glossary = nil
+		} else {
+			glossary = g
 		}
 	}
 
@@ -237,9 +274,8 @@ func main() {
 	var sink StreamSink = newStderrSink(os.Stderr)
 	var tuiCleanup func()
 	var tuiDone <-chan struct{}
-	meetingID := MeetingSessionID()
-	if enableAgents && stderrIsTTY() {
-		s, c, d := startTUI(meetingID)
+	if cfg.EnableAgents && stderrIsTTY() {
+		s, c, d := startTUI(cfg.MeetingID)
 		sink, tuiCleanup, tuiDone = s, c, d
 		// Reroute the global slog default through the TUI sink and
 		// suppress INFO so claudia's per-agent startup chatter
@@ -247,42 +283,46 @@ func main() {
 		installSlogIntoSink(sink)
 	}
 
-	// Slide-event source:
-	//   --no-spawn / stdin is a pipe → consume os.Stdin (CI, tests).
-	//   otherwise (interactive run)  → spawn pageflip ourselves.
+	// Persist the manifest as early as possible so an immediate
+	// Ctrl-C still leaves enough state on disk for `meetcat resume`
+	// to pick up. The manifest dir is also where session-ids.json
+	// will land at meeting end.
+	manifest := Manifest{
+		SchemaVersion: currentManifestSchema,
+		MeetingID:     cfg.MeetingID,
+		CreatedAt:     time.Now().UTC(),
+		WorkDir:       cfg.WorkDir,
+		GlossaryCache: cfg.GlossaryCache,
+		Specialists:   sortedAllowedNames(cfg.AllowedNames),
+		Pageflip:      cfg.Pageflip,
+	}
+	if err := WriteManifest(cfg.WorkDir, manifest); err != nil {
+		// Manifest write failure is loud but not fatal — the meeting
+		// can still proceed; resume just won't be available later.
+		fmt.Fprintf(os.Stderr, "meetcat: manifest write failed: %v (resume will not be available)\n", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Slide-event source: pipe pageflip's stdout through unless the
+	// caller has explicitly opted out (--no-spawn) or stdin is
+	// already a pipe (CI / tests).
 	var eventStream io.Reader = os.Stdin
 	var pageflipCleanup func()
-	if !*noSpawn && stdinIsTTY() {
-		var pageflipArgs []string
-		if *regionFlag != "" {
-			pageflipArgs = append(pageflipArgs, "--region", *regionFlag)
-		}
-		if *windowFlag {
-			pageflipArgs = append(pageflipArgs, "--window")
-		}
-		if *windowTitleFlag != "" {
-			pageflipArgs = append(pageflipArgs, "--window-title", *windowTitleFlag)
-		}
-		if *windowIDFlag != "" {
-			pageflipArgs = append(pageflipArgs, "--window-id", *windowIDFlag)
-		}
-		stream, cleanup, err := spawnPageflip(ctx, sink, pageflipArgs)
+	if !cfg.NoSpawn && stdinIsTTY() {
+		stream, cleanup, err := spawnPageflip(ctx, sink, cfg.Pageflip.toFlags())
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "meetcat:", err)
-			os.Exit(1)
+			return err
 		}
 		eventStream = stream
 		pageflipCleanup = cleanup
 	}
 
 	// User-initiated TUI quit (q / Ctrl-C) propagates to a process
-	// shutdown: cancel the context (which SIGTERMs pageflip via
-	// cmd.Cancel; pageflip closing its stdout then unblocks our
-	// decoder with EOF) and close os.Stdin as a fallback for the
-	// --no-spawn case.
+	// shutdown: cancel the context (SIGTERMs pageflip via cmd.Cancel
+	// so its stdout closes and our decoder hits EOF) and close stdin
+	// as a fallback for the --no-spawn case.
 	if tuiDone != nil {
 		go func() {
 			<-tuiDone
@@ -292,16 +332,15 @@ func main() {
 	}
 
 	var pool *SessionPool
-	if enableAgents {
-		allowedNames := ParseSpecialistNames(*specialistsFlag)
-		pool = NewSessionPool(meetingID, *workDir, sink, logger, allowedNames, glossary)
+	if cfg.EnableAgents {
+		pool = NewSessionPool(cfg.MeetingID, cfg.WorkDir, sink, cfg.Logger, cfg.AllowedNames, glossary)
 	}
 
-	runErr := run(ctx, eventStream, sink, logger, pool)
+	runErr := run(ctx, eventStream, sink, cfg.Logger, pool)
 
-	// Shutdown order: TUI tears down the alt-screen first so that
-	// post-meeting writes to os.Stderr (session IDs, neutral attach
-	// hint) aren't garbled by a screen-restore race.
+	// Shutdown order: TUI tears down the alt-screen first so the
+	// post-meeting writes to os.Stderr (session IDs, resume hint)
+	// aren't garbled by a screen-restore race.
 	if tuiCleanup != nil {
 		tuiCleanup()
 	}
@@ -310,13 +349,88 @@ func main() {
 	}
 	if pool != nil {
 		writeSessionIDsIfPossible(pool, os.Stderr)
-		printNeutralAttachHint(pool, os.Stderr)
+		printResumeHint(pool, os.Stderr)
 	}
+	return runErr
+}
 
-	if runErr != nil {
-		fmt.Fprintln(os.Stderr, "meetcat:", runErr)
+// sortedAllowedNames returns the map keys in canonical order so the
+// manifest's `specialists` field is stable across runs (otherwise
+// the JSON diff churns on Go's map-iteration order). Returns nil
+// when the allow set is empty (semantics: "all specialists").
+func sortedAllowedNames(allow map[string]bool) []string {
+	if len(allow) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(allow))
+	for name := range allow {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// runResume loads a manifest and re-runs the meeting with the same
+// configuration. The per-specialist Claude Code sessions auto-resume
+// because their session IDs are deterministic from (meeting_id,
+// role) and the underlying JSONLs persist across runs.
+func runResume(args []string) {
+	resumeFlags := flag.NewFlagSet("resume", flag.ExitOnError)
+	if err := resumeFlags.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat resume:", err)
+		os.Exit(2)
+	}
+	rest := resumeFlags.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: meetcat resume <meeting-id-or-dir>")
+		os.Exit(2)
+	}
+	target := rest[0]
+
+	// Accept both "meetcat-1234" (a bare ID, looked up under cwd) and
+	// "path/to/meetcat-1234" (an explicit directory). Either way,
+	// resolve the manifest under that directory.
+	manifestDir := target
+	if _, err := os.Stat(manifestDir); err != nil {
+		// Fall back to interpreting target as a bare ID under cwd.
+		manifestDir = filepath.Join(".", target)
+	}
+	manifest, err := ReadManifest(manifestDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "meetcat resume: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Logger is not currently persisted in the manifest — a future
+	// extension could carry the original --log-file path. Resume
+	// runs without a session log unless the caller pipes one in via
+	// the (still-supported) -log-file on the resume invocation.
+	cfg := meetingConfig{
+		MeetingID:     manifest.MeetingID,
+		WorkDir:       manifest.WorkDir,
+		GlossaryCache: manifest.GlossaryCache,
+		AllowedNames:  namesToSet(manifest.Specialists),
+		EnableAgents:  true, // resume is meaningless without agents
+		NoSpawn:       false,
+		Pageflip:      manifest.Pageflip,
+	}
+
+	fmt.Fprintf(os.Stderr, "meetcat: resuming meeting %s (work_dir=%s)\n", cfg.MeetingID, cfg.WorkDir)
+	if err := runMeeting(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat resume:", err)
+		os.Exit(1)
+	}
+}
+
+func namesToSet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
 }
 
 // stdinIsTTY reports whether stdin is connected to an interactive

@@ -256,11 +256,7 @@ func (s *stderrSink) SpecialistReady(role string) {
 }
 
 func (s *stderrSink) SpecialistStopped(role string, turns int) {
-	suffix := fmt.Sprintf("stopped (turns: %d)", turns)
-	if role == "neutral" {
-		suffix = fmt.Sprintf("kept alive (turns: %d)", turns)
-	}
-	fmt.Fprintf(s.w, "%s %s\n", tag(role), colorize(colorDim, suffix))
+	fmt.Fprintf(s.w, "%s %s\n", tag(role), colorize(colorDim, fmt.Sprintf("stopped (turns: %d)", turns)))
 }
 
 func (s *stderrSink) SystemLine(text string) {
@@ -536,15 +532,16 @@ func (p *SessionPool) SendSlide(ctx context.Context, ev *slideEvent) {
 	}
 }
 
-// StopAll cleanly shuts down all running agents except the neutral
-// session, which is kept alive in tmux for post-meeting use (🎯T15).
-// The neutral agent's tmux session persists; its worker goroutine
-// still drains any queued slides before exiting.
+// StopAll cleanly shuts down every specialist agent. The Claude Code
+// JSONL files persist regardless of whether the tmux window is torn
+// down, so resuming a meeting with `meetcat resume <meeting-id>`
+// works for all five specialists with no need to keep tmux windows
+// hanging around per-meeting.
 //
 // 🎯T23: closes each specialist's queue, waits for its worker
 // goroutine to finish processing in-flight slides, then stops the
-// agent (or, for neutral, leaves it running). The drain step is
-// what guarantees the final slide's responses are not dropped.
+// agent. The drain step is what guarantees the final slide's
+// responses are not dropped.
 func (p *SessionPool) StopAll() {
 	p.mu.Lock()
 	if p.stopped {
@@ -573,29 +570,14 @@ func (p *SessionPool) StopAll() {
 			turns := st.turnCount
 			st.mu.Unlock()
 
-			if name != "neutral" {
-				// 🎯T15: keep the neutral session alive in tmux.
-				st.agent.Stop()
-			}
-			// Both branches feed the status bar; "neutral" is implicit
-			// in stderrSink which renders "kept alive" instead of
-			// "stopped" for that role.
+			// All specialists tear down their tmux windows uniformly
+			// at meeting end. The session JSONL persists so resume is
+			// equally available for every role.
+			st.agent.Stop()
 			p.sink.SpecialistStopped(name, turns)
 		}(name, st)
 	}
 	wg.Wait()
-}
-
-// NeutralAgent returns the neutral specialist's agent, if started.
-// Returns nil when the neutral specialist is not in the pool (e.g.
-// filtered out via --specialists).
-func (p *SessionPool) NeutralAgent() *claudia.Agent {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if st, ok := p.specialists["neutral"]; ok {
-		return st.agent
-	}
-	return nil
 }
 
 // SessionIDs returns a map of specialist name → session ID for all
