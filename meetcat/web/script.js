@@ -44,7 +44,7 @@ setInterval(() => {
 // Slide state: map<slide_id, { card, blocks: { role: { block, content } } }>
 const slides = new Map();
 
-function ensureSlideCard(slideID, imageURL) {
+function ensureSlideCard(slideID, imageURL, wasPinned) {
   if (slides.has(slideID)) return slides.get(slideID);
   const card = document.createElement('section');
   card.className = 'slide-card';
@@ -58,6 +58,16 @@ function ensureSlideCard(slideID, imageURL) {
     const img = document.createElement('img');
     img.alt = `slide ${slideID}`;
     img.src = imageURL;
+    // The image loads asynchronously. The slide handler's
+    // synchronous scrollToBottomIfPinned runs against a card
+    // height that doesn't yet include the image, so the page
+    // appears to grow *after* we scrolled. Re-scroll on image
+    // load if we were pinned when the slide first arrived.
+    if (wasPinned) {
+      img.addEventListener('load', () => {
+        window.scrollTo({ top: document.documentElement.scrollHeight });
+      });
+    }
     imgWrap.appendChild(img);
     // Floating large-preview that appears on hover. Same src as the
     // thumbnail (browser cache-hits the second decode), shown via
@@ -119,7 +129,7 @@ function scrollToBottomIfPinned(wasPinned) {
 evt.addEventListener('slide', (e) => {
   const wasPinned = isPinnedToBottom();
   const d = JSON.parse(e.data);
-  ensureSlideCard(d.slide_id, d.image_url || '');
+  ensureSlideCard(d.slide_id, d.image_url || '', wasPinned);
   frames += 1;
   frameCounterEl.textContent = `frames: ${frames}`;
   lastSlideEl.textContent = `last: ${d.slide_id}`;
@@ -131,7 +141,7 @@ evt.addEventListener('slide', (e) => {
 evt.addEventListener('specialist', (e) => {
   const wasPinned = isPinnedToBottom();
   const d = JSON.parse(e.data);
-  const entry = ensureSlideCard(d.slide_id, '');
+  const entry = ensureSlideCard(d.slide_id, '', wasPinned);
   const b = ensureBlock(entry, d.role);
   b.content.innerHTML = d.html;
   b.block.classList.add('streaming');
