@@ -185,11 +185,17 @@ func main() {
 	showHelp := flag.Bool("help", false, "Print help and exit.")
 	showHelpAgent := flag.Bool("help-agent", false, "Print machine-readable help and exit.")
 	logFile := flag.String("log-file", "", "Path to write NDJSON session log (append, created if absent).")
-	enableAgents := flag.Bool("agents", false, "Spawn claudia specialist sessions for each slide.")
+	noAgents := flag.Bool("no-agents", false, "Disable claudia specialist sessions (decode-only mode).")
 	workDir := flag.String("work-dir", ".", "Working directory passed to claudia agents.")
 	specialistsFlag := flag.String("specialists", "", "Comma-separated list of specialists to start (default: all). E.g. skeptic,neutral")
 	glossaryCachePath := flag.String("glossary-cache", defaultGlossaryCachePath(), "Path to glossary JSON cache.")
+	noSpawn := flag.Bool("no-spawn", false, "Don't spawn pageflip; read slide events from stdin instead.")
+	regionFlag := flag.String("region", "", "Forwarded to pageflip as --region X,Y,W,H. Omit to run the multi-monitor picker.")
+	windowFlag := flag.Bool("window", false, "Forwarded to pageflip as --window (interactive window picker).")
+	windowTitleFlag := flag.String("window-title", "", "Forwarded to pageflip as --window-title SUBSTRING.")
+	windowIDFlag := flag.String("window-id", "", "Forwarded to pageflip as --window-id ID.")
 	flag.Parse()
+	enableAgents := !*noAgents
 
 	switch {
 	case *showVersion:
@@ -226,52 +232,107 @@ func main() {
 		}
 	}
 
-	// Build the StreamSink before the pool so the pool can be wired
-	// directly. TUI mode is selected when stderr is a TTY and agents
-	// are enabled; otherwise plain stderr.
+	// TUI sink takes the terminal in alt-screen mode when stderr is a
+	// TTY and agents are enabled; otherwise stderr stays plain text.
 	var sink StreamSink = newStderrSink(os.Stderr)
 	var tuiCleanup func()
+	var tuiDone <-chan struct{}
 	meetingID := MeetingSessionID()
-	if *enableAgents && stderrIsTTY() {
-		s, c, done := startTUI(meetingID)
-		sink = s
-		tuiCleanup = c
-		// Watch for the user quitting the TUI from the keyboard
-		// (q / Ctrl-C). bubbletea exits its own event loop, but the
-		// stdin decode loop in runText is still blocked on Decode().
-		// Closing os.Stdin makes that read return os.ErrClosed (which
-		// runText treats as a clean EOF) so the deferred StopAll
-		// drains the agents and the process exits cleanly without a
-		// second Ctrl-C.
+	if enableAgents && stderrIsTTY() {
+		s, c, d := startTUI(meetingID)
+		sink, tuiCleanup, tuiDone = s, c, d
+	}
+
+	// Slide-event source:
+	//   --no-spawn / stdin is a pipe → consume os.Stdin (CI, tests).
+	//   otherwise (interactive run)  → spawn pageflip ourselves.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var eventStream io.Reader = os.Stdin
+	var pageflipCleanup func()
+	if !*noSpawn && stdinIsTTY() {
+		var pageflipArgs []string
+		if *regionFlag != "" {
+			pageflipArgs = append(pageflipArgs, "--region", *regionFlag)
+		}
+		if *windowFlag {
+			pageflipArgs = append(pageflipArgs, "--window")
+		}
+		if *windowTitleFlag != "" {
+			pageflipArgs = append(pageflipArgs, "--window-title", *windowTitleFlag)
+		}
+		if *windowIDFlag != "" {
+			pageflipArgs = append(pageflipArgs, "--window-id", *windowIDFlag)
+		}
+		stream, cleanup, err := spawnPageflip(ctx, sink, pageflipArgs)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "meetcat:", err)
+			os.Exit(1)
+		}
+		eventStream = stream
+		pageflipCleanup = cleanup
+	}
+
+	// User-initiated TUI quit (q / Ctrl-C) propagates to a process
+	// shutdown: cancel the context (which SIGTERMs pageflip via
+	// cmd.Cancel; pageflip closing its stdout then unblocks our
+	// decoder with EOF) and close os.Stdin as a fallback for the
+	// --no-spawn case.
+	if tuiDone != nil {
 		go func() {
-			<-done
+			<-tuiDone
+			cancel()
 			_ = os.Stdin.Close()
 		}()
 	}
 
 	var pool *SessionPool
-	if *enableAgents {
+	if enableAgents {
 		allowedNames := ParseSpecialistNames(*specialistsFlag)
 		pool = NewSessionPool(meetingID, *workDir, sink, logger, allowedNames, glossary)
 	}
 
-	if err := run(context.Background(), os.Stdin, sink, logger, pool, tuiCleanup); err != nil {
-		if tuiCleanup != nil {
-			tuiCleanup()
-		}
-		fmt.Fprintln(os.Stderr, "meetcat:", err)
+	runErr := run(ctx, eventStream, sink, logger, pool)
+
+	// Shutdown order: TUI tears down the alt-screen first so that
+	// post-meeting writes to os.Stderr (session IDs, neutral attach
+	// hint) aren't garbled by a screen-restore race.
+	if tuiCleanup != nil {
+		tuiCleanup()
+	}
+	if pageflipCleanup != nil {
+		pageflipCleanup()
+	}
+	if pool != nil {
+		writeSessionIDsIfPossible(pool, os.Stderr)
+		printNeutralAttachHint(pool, os.Stderr)
+	}
+
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, "meetcat:", runErr)
 		os.Exit(1)
 	}
+}
+
+// stdinIsTTY reports whether stdin is connected to an interactive
+// terminal (not a pipe or redirected file). Used to decide whether
+// meetcat should spawn pageflip itself or consume the existing pipe.
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // run processes the slide-event stream from in, routing every line
 // of output through the supplied sink. pool, if non-nil, receives
 // each validated slide event for specialist analysis. logger may be
-// nil (no-op). tuiCleanup, if non-nil, is invoked from the deferred
-// shutdown path to tear down the bubbletea program before any
-// post-meeting stderr writes.
-func run(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool, tuiCleanup func()) error {
-	return runText(ctx, in, sink, logger, pool, tuiCleanup)
+// nil (no-op). The caller owns TUI / pageflip lifecycle — run is
+// straight-line decode + dispatch.
+func run(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool) error {
+	return runText(ctx, in, sink, logger, pool)
 }
 
 // stderrIsTTY reports whether stderr is connected to an interactive
@@ -287,11 +348,10 @@ func stderrIsTTY() bool {
 }
 
 // runText reads slide events from in and routes every line of output
-// through sink. tuiCleanup, if non-nil, is the bubbletea teardown
-// function returned by startTUI — invoked from the deferred shutdown
-// before any post-meeting writes to os.Stderr so the alt-screen
-// restore doesn't race with stderr writes.
-func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool, tuiCleanup func()) error {
+// through sink. Lifecycle of any TUI / spawned pageflip is owned by
+// the caller; runText only knows about the event stream and the
+// specialist pool.
+func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool) error {
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
@@ -316,14 +376,6 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 			for name, n := range ts {
 				sink.SystemLine(fmt.Sprintf("  %s %d", tag(name), n))
 			}
-			// Tear down the TUI before printing post-meeting hints to
-			// the real os.Stderr — otherwise the alt-screen restore
-			// races the writes and the operator sees garbled output.
-			if tuiCleanup != nil {
-				tuiCleanup()
-			}
-			writeSessionIDsIfPossible(pool, os.Stderr)
-			printNeutralAttachHint(pool, os.Stderr)
 		}()
 	}
 
