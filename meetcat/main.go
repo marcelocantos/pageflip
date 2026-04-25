@@ -279,12 +279,16 @@ func runMeeting(cfg meetingConfig) error {
 	var sink StreamSink = newStderrSink(os.Stderr)
 	var webShutdown func()
 	if cfg.EnableAgents && stderrIsTTY() {
+		absWork, err := filepath.Abs(cfg.WorkDir)
+		if err != nil {
+			return fmt.Errorf("resolve work dir: %w", err)
+		}
 		h := newHub()
-		url, shutdown, err := startWebServer(cfg.MeetingID, cfg.WorkDir, h)
+		url, shutdown, err := startWebServer(cfg.MeetingID, absWork, h)
 		if err != nil {
 			return fmt.Errorf("start web server: %w", err)
 		}
-		sink = newWebSink(h)
+		sink = newWebSink(h, absWork)
 		webShutdown = shutdown
 		fmt.Fprintf(os.Stderr, "meetcat: open %s in your browser (Ctrl-C to stop)\n", url)
 		_ = openInBrowser(url)
@@ -554,14 +558,15 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 			))
 			continue
 		}
-		// OpenSection both updates the TUI status bar AND opens the
-		// section node in the viewport so subsequent specialist lines
-		// for this slide_id group correctly. In stderr mode the
-		// section header just prints in chronological order.
+		// OpenSection feeds both the web view (which uses imagePath
+		// to compute a clean /slides/* URL) and the stderr fallback
+		// (which just prints the header). imagePath is the absolute
+		// path to the captured PNG; the web sink rebases it under
+		// the meeting work_dir to build a serveable URL.
 		sink.OpenSection(ev.SlideID, slideSectionHeader(
 			count, ev.SlideID, front, ev.Path,
 			ev.TStartMs, ev.TEndMs-ev.TStartMs,
-		))
+		), ev.Path)
 
 		// Send slide to all specialist agents in parallel. SendSlide
 		// returns immediately after queueing per 🎯T23.

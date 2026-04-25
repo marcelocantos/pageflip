@@ -225,8 +225,10 @@ type specialistState struct {
 type StreamSink interface {
 	// OpenSection signals that a new slide event has arrived. The
 	// sink may use slide_id to group later SpecialistLine calls that
-	// name this same slide_id under the section header.
-	OpenSection(slideID, header string)
+	// name this same slide_id under the section header. imagePath is
+	// the absolute path to the captured slide PNG so the web sink can
+	// surface a clean image URL — the stderrSink ignores it.
+	OpenSection(slideID, header, imagePath string)
 
 	// SpecialistLine emits one line of specialist output. slideID
 	// names the slide the specialist is currently processing, or ""
@@ -275,7 +277,7 @@ type stderrSink struct {
 
 func newStderrSink(w io.Writer) *stderrSink { return &stderrSink{w: w} }
 
-func (s *stderrSink) OpenSection(_, header string) {
+func (s *stderrSink) OpenSection(_, header, _ string) {
 	fmt.Fprintln(s.w, header)
 }
 

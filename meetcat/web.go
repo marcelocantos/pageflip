@@ -13,9 +13,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -177,23 +179,50 @@ func (h *hub) unsubscribe(c chan webEvent) {
 type webSink struct {
 	hub *hub
 
+	// absWorkDir is the absolute, cleaned work_dir for the meeting.
+	// It's used to rebase the slide PNG's absolute filesystem path
+	// to a /slides/* URL the embedded HTTP server will serve. Stored
+	// in absolute form so OpenSection's rebase doesn't depend on
+	// process cwd at call time.
+	absWorkDir string
+
 	mu      sync.Mutex
 	buffers map[string]string // key: slideID + "|" + role
 }
 
-func newWebSink(h *hub) *webSink {
-	return &webSink{hub: h, buffers: map[string]string{}}
+func newWebSink(h *hub, absWorkDir string) *webSink {
+	return &webSink{hub: h, absWorkDir: absWorkDir, buffers: map[string]string{}}
 }
 
-func (s *webSink) OpenSection(slideID, header string) {
+func (s *webSink) OpenSection(slideID, header, imagePath string) {
+	imageURL := ""
+	if imagePath != "" {
+		if rel, err := filepath.Rel(s.absWorkDir, imagePath); err == nil && !strings.HasPrefix(rel, "..") {
+			// URL-escape each path segment but keep the slashes so
+			// the server's /slides/<rel> handler routes correctly.
+			imageURL = "/slides/" + escapeURLPath(rel)
+		}
+	}
 	s.hub.publish(webEvent{
 		kind: "slide",
 		payload: map[string]any{
-			"slide_id": slideID,
-			"header":   header,
-			"at":       time.Now().UnixMilli(),
+			"slide_id":  slideID,
+			"header":    header,
+			"image_url": imageURL,
+			"at":        time.Now().UnixMilli(),
 		},
 	})
+}
+
+// escapeURLPath URL-escapes each path segment while preserving the
+// "/" boundaries so a path like "pageflip-1234/20260425T....png"
+// yields the same shape with each segment correctly path-escaped.
+func escapeURLPath(p string) string {
+	parts := strings.Split(p, "/")
+	for i, seg := range parts {
+		parts[i] = url.PathEscape(seg)
+	}
+	return strings.Join(parts, "/")
 }
 
 func (s *webSink) SpecialistLine(role, slideID, text string) {

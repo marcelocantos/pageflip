@@ -44,26 +44,25 @@ setInterval(() => {
 // Slide state: map<slide_id, { card, blocks: { role: { block, content } } }>
 const slides = new Map();
 
-function ensureSlideCard(slideID, header) {
+function ensureSlideCard(slideID, imageURL) {
   if (slides.has(slideID)) return slides.get(slideID);
   const card = document.createElement('section');
   card.className = 'slide-card';
   card.dataset.slideId = slideID;
 
-  const imgWrap = document.createElement('div');
+  const imgWrap = document.createElement('a');
   imgWrap.className = 'slide-image';
-  const img = document.createElement('img');
-  img.alt = `slide ${slideID}`;
-  img.src = `/slides/${encodeSlidePath(header)}`;
-  imgWrap.appendChild(img);
+  imgWrap.target = '_blank';
+  if (imageURL) {
+    imgWrap.href = imageURL;
+    const img = document.createElement('img');
+    img.alt = `slide ${slideID}`;
+    img.src = imageURL;
+    imgWrap.appendChild(img);
+  }
 
   const analysis = document.createElement('div');
   analysis.className = 'analysis';
-
-  const meta = document.createElement('div');
-  meta.className = 'slide-meta';
-  meta.innerHTML = formatMeta(header, slideID);
-  analysis.appendChild(meta);
 
   card.appendChild(imgWrap);
   card.appendChild(analysis);
@@ -72,36 +71,6 @@ function ensureSlideCard(slideID, header) {
   const entry = { card, analysis, blocks: {} };
   slides.set(slideID, entry);
   return entry;
-}
-
-// The header line emitted by the server (slideSectionHeader in
-// colors.go) carries the absolute slide PNG path. Pull it out and
-// turn it into a /slides/... URL relative to work_dir. We rely on
-// the path landing inside work_dir so the server's pathInside guard
-// passes; if it doesn't, the image just won't load and the rest of
-// the analysis still renders.
-function encodeSlidePath(header) {
-  const m = header.match(/\s(\/[^\s]+\.png)/);
-  if (!m) return '';
-  // The server's /slides/ handler joins the request path under
-  // work_dir.Abs. We strip the leading '/' so the join treats it
-  // as a child path; if work_dir was set to "." (the default),
-  // the path will resolve correctly only if the cwd contains the
-  // pageflip-<ts> dir. The work_dir/slide_path mismatch is a
-  // known limitation — for v1 we just URL-encode and let the
-  // server reject if it escapes.
-  return encodeURIComponent(m[1]);
-}
-
-function formatMeta(header, slideID) {
-  // Header is the unformatted text plus ANSI escapes from the
-  // section line. Strip ANSI for display and bold the slide_id.
-  const plain = stripAnsi(header);
-  const escaped = htmlEscape(plain).replace(
-    new RegExp(`\\b${escapeRegex(slideID)}\\b`),
-    `<span class="slide-id">${slideID}</span>`,
-  );
-  return escaped;
 }
 
 function ensureBlock(entry, role) {
@@ -123,31 +92,53 @@ function ensureBlock(entry, role) {
 
 const evt = new EventSource('/events');
 
+// Auto-scroll: track whether the page was at the bottom (or
+// hadn't filled the viewport yet) just before each content arrival.
+// When new content lands, only auto-scroll if the user wasn't
+// reading scrollback above the fold.
+function isPinnedToBottom() {
+  const slack = 80; // px tolerance for "near bottom"
+  const docH = document.documentElement.scrollHeight;
+  const viewBottom = window.innerHeight + window.scrollY;
+  return docH <= window.innerHeight + slack || (docH - viewBottom) <= slack;
+}
+function scrollToBottomIfPinned(wasPinned) {
+  if (wasPinned) {
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' });
+  }
+}
+
 evt.addEventListener('slide', (e) => {
+  const wasPinned = isPinnedToBottom();
   const d = JSON.parse(e.data);
-  ensureSlideCard(d.slide_id, d.header);
+  ensureSlideCard(d.slide_id, d.image_url || '');
   frames += 1;
   frameCounterEl.textContent = `frames: ${frames}`;
   lastSlideEl.textContent = `last: ${d.slide_id}`;
   lastSlideAt = Date.now();
   ageEl.textContent = `age: 0s`;
+  scrollToBottomIfPinned(wasPinned);
 });
 
 evt.addEventListener('specialist', (e) => {
+  const wasPinned = isPinnedToBottom();
   const d = JSON.parse(e.data);
   const entry = ensureSlideCard(d.slide_id, '');
   const b = ensureBlock(entry, d.role);
   b.content.innerHTML = d.html;
   b.block.classList.add('streaming');
+  scrollToBottomIfPinned(wasPinned);
 });
 
 evt.addEventListener('turn-done', (e) => {
+  const wasPinned = isPinnedToBottom();
   const d = JSON.parse(e.data);
   const entry = slides.get(d.slide_id);
   if (!entry) return;
   const b = ensureBlock(entry, d.role);
   b.content.innerHTML = d.html;
   b.block.classList.remove('streaming');
+  scrollToBottomIfPinned(wasPinned);
 });
 
 evt.addEventListener('state', (e) => {
@@ -184,14 +175,3 @@ evt.onerror = () => {
   // the age field — the value will keep growing.
 };
 
-// --- helpers -------------------------------------------------------
-
-function stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-}
-function htmlEscape(s) {
-  return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-}
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
