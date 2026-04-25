@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -28,6 +29,17 @@ import (
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
 )
+
+// ansiAnyRe matches the ANSI escape forms emitted by the codebase
+// — CSI (`\x1b[...]<letter>`) and OSC (`\x1b]...\x07`). Used to
+// scrub display payloads before they cross to the browser, which
+// has no terminal-ANSI interpreter and would otherwise render the
+// raw codes verbatim (e.g. "[90mpageflip: ...[0m").
+var ansiAnyRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07`)
+
+func stripANSI(s string) string {
+	return ansiAnyRe.ReplaceAllString(s, "")
+}
 
 //go:embed web/*
 var webAssets embed.FS
@@ -229,12 +241,14 @@ func (s *webSink) SpecialistLine(role, slideID, text string) {
 	if slideID == "" {
 		// Lifecycle / system message tied to a specialist (startup
 		// errors, etc.). Surface as a system line tagged with the
-		// role so the page can colour it appropriately.
+		// role so the page can colour it appropriately. ANSI codes
+		// from colorize() in agents.go would render as raw "[91m"
+		// glyphs in the browser, so strip them here.
 		s.hub.publish(webEvent{
 			kind: "system",
 			payload: map[string]any{
 				"role": role,
-				"text": text,
+				"text": stripANSI(text),
 			},
 		})
 		return
@@ -299,7 +313,7 @@ func (s *webSink) SystemLine(text string) {
 	s.hub.publish(webEvent{
 		kind: "system",
 		payload: map[string]any{
-			"text": text,
+			"text": stripANSI(text),
 		},
 	})
 }
