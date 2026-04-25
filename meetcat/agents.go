@@ -159,6 +159,16 @@ func ParseSpecialistNames(raw string) map[string]bool {
 // rather than raise the limit.
 const slideQueueSize = 1024
 
+// slideJob is one queued slide to dispatch to one specialist. The
+// slideID travels alongside the rendered body so the agent's OnEvent
+// handler can label streaming output with the slide it belongs to —
+// even if a slow specialist finishes earlier slides long after the
+// next slide's header has been printed.
+type slideJob struct {
+	slideID string
+	body    string
+}
+
 // specialistState holds a running specialist agent and its metrics.
 type specialistState struct {
 	name      string
@@ -166,17 +176,23 @@ type specialistState struct {
 	sessionID string
 	agent     *claudia.Agent
 	turnCount int
-	mu        sync.Mutex // guards turnCount
+	mu        sync.Mutex // guards turnCount and currentSlideID
 
-	// 🎯T23: per-specialist work queue. SendSlide pushes one message
-	// per slide; runSpecialistWorker drains it serially, calling
-	// Send + WaitForResponse for each. This decouples the slide-event
-	// loop from per-specialist latency so meetcat keeps reading
-	// pageflip's NDJSON stream regardless of how long the previous
-	// slide is still being analysed. Closed by StopAll to signal
-	// drain-and-exit; the worker's for-range terminates once the
-	// channel is empty.
-	queue chan string
+	// currentSlideID is the slide the worker is presently waiting on
+	// a response for. Set before agent.Send, cleared after
+	// WaitForResponse returns. Read by the OnEvent callback to label
+	// streaming token output with the right slide_id.
+	currentSlideID string
+
+	// 🎯T23: per-specialist work queue. SendSlide pushes one job per
+	// slide; runSpecialistWorker drains it serially, calling Send +
+	// WaitForResponse for each. This decouples the slide-event loop
+	// from per-specialist latency so meetcat keeps reading pageflip's
+	// NDJSON stream regardless of how long the previous slide is
+	// still being analysed. Closed by StopAll to signal drain-and-
+	// exit; the worker's for-range terminates once the channel is
+	// empty.
+	queue chan slideJob
 }
 
 // SessionPool manages the set of specialist agents for one meeting.
@@ -303,11 +319,15 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 		agent:     agent,
 	}
 
-	// Wire event handler to stream assistant tokens to stderr, tagged.
-	// 🎯T19.4: wrap bare URLs with OSC 8 hyperlinks in text mode output.
+	// Wire event handler to stream assistant tokens to stderr, tagged
+	// with both the role and the slide_id of the slide currently being
+	// processed. 🎯T19.4: wrap bare URLs with OSC 8 hyperlinks.
 	agent.OnEvent(func(ev claudia.Event) {
 		if ev.Type == "assistant" && ev.Text != "" {
-			fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), wrapURLs(ev.Text))
+			st.mu.Lock()
+			slideID := st.currentSlideID
+			st.mu.Unlock()
+			fmt.Fprintf(p.stderr, "%s %s\n", tagWithSlide(spec.name, slideID), wrapURLs(ev.Text))
 		}
 	})
 
@@ -329,7 +349,7 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 	// role-acknowledgement round-trip to perform here.
 	release()
 
-	st.queue = make(chan string, slideQueueSize)
+	st.queue = make(chan slideJob, slideQueueSize)
 
 	p.mu.Lock()
 	if p.stopped {
@@ -357,18 +377,29 @@ func (p *SessionPool) runSpecialistWorker(ctx context.Context, st *specialistSta
 // processSlide sends one rendered slide message to one specialist
 // and waits for the response. Per-specialist serialisation is
 // guaranteed because only the worker goroutine ever calls this for
-// a given st.
-func (p *SessionPool) processSlide(ctx context.Context, st *specialistState, msg string) {
+// a given st. The slide_id is parked on st.currentSlideID for the
+// duration of the turn so the agent's OnEvent callback can label
+// streamed tokens with the slide they belong to.
+func (p *SessionPool) processSlide(ctx context.Context, st *specialistState, job slideJob) {
 	start := time.Now()
 
-	if err := st.agent.Send(msg); err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tag(st.name), colorize(colorError, fmt.Sprintf("send error: %v", err)))
+	st.mu.Lock()
+	st.currentSlideID = job.slideID
+	st.mu.Unlock()
+	defer func() {
+		st.mu.Lock()
+		st.currentSlideID = ""
+		st.mu.Unlock()
+	}()
+
+	if err := st.agent.Send(job.body); err != nil {
+		fmt.Fprintf(p.stderr, "%s %s\n", tagWithSlide(st.name, job.slideID), colorize(colorError, fmt.Sprintf("send error: %v", err)))
 		p.logger.LogSpecialistError(st.name, "send_failed")
 		return
 	}
 
 	if _, err := st.agent.WaitForResponse(ctx); err != nil {
-		fmt.Fprintf(p.stderr, "%s %s\n", tag(st.name), colorize(colorError, fmt.Sprintf("response error: %v", err)))
+		fmt.Fprintf(p.stderr, "%s %s\n", tagWithSlide(st.name, job.slideID), colorize(colorError, fmt.Sprintf("response error: %v", err)))
 		p.logger.LogSpecialistError(st.name, "response_failed")
 		return
 	}
@@ -417,8 +448,9 @@ func (p *SessionPool) SendSlide(ctx context.Context, ev *slideEvent) {
 	if p.stopped {
 		return
 	}
+	job := slideJob{slideID: ev.SlideID, body: msg}
 	for _, st := range p.specialists {
-		st.queue <- msg
+		st.queue <- job
 	}
 }
 

@@ -62,6 +62,54 @@ func tag(name string) string {
 	return fmt.Sprintf("%s[%s]%s", col, name, colorReset)
 }
 
+// tagWithSlide returns `[name | slideID]` so that when a slow specialist
+// finishes a turn for an earlier slide after a newer slide's section
+// header has already scrolled past, the line still attributes itself to
+// the right slide. When slideID is empty (e.g. a startup or shutdown
+// message that isn't tied to a slide), this falls back to the plain
+// `tag()` form.
+func tagWithSlide(name, slideID string) string {
+	if slideID == "" {
+		return tag(name)
+	}
+	if !colorsOn() {
+		return fmt.Sprintf("[%s | %s]", name, slideID)
+	}
+	col, ok := specialistColors[name]
+	if !ok {
+		col = colorDim
+	}
+	return fmt.Sprintf("%s[%s | %s]%s", col, name, slideID, colorReset)
+}
+
+// slideSectionHeader renders the visual separator that opens a new
+// slide's section. It's printed the moment a slide event passes
+// validation in runText, so the operator gets immediate signal that
+// pageflip's output reached the head of meetcat's pipeline. The trailing
+// long rule lets the eye scan back to the start of any slide quickly.
+func slideSectionHeader(count int, slideID, app, path string, tStartMs, durMs uint64) string {
+	if app == "" {
+		app = "-"
+	}
+	if !colorsOn() {
+		return fmt.Sprintf(
+			"──── ◆ [%d] %s ──── (t=%dms, dur=%dms, app=%s) %s",
+			count, slideID, tStartMs, durMs, app, path,
+		)
+	}
+	rule := colorize(colorDim, "────")
+	return fmt.Sprintf(
+		"%s %s [%d] %s %s %s %s",
+		rule,
+		colorize(colorSlide, "◆"),
+		count,
+		colorize(colorSlide, slideID),
+		rule,
+		colorize(colorDim, fmt.Sprintf("(t=%dms, dur=%dms, app=%s)", tStartMs, durMs, app)),
+		path,
+	)
+}
+
 // colorize wraps `text` in the given ANSI escape when colours are enabled.
 func colorize(code, text string) string {
 	if !colorsOn() {

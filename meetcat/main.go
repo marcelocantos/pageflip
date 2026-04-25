@@ -327,12 +327,10 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 			)
 			continue
 		}
-		fmt.Fprintf(
-			summary,
-			"%s [%d] %s (t=%dms, dur=%dms, app=%s) %s\n",
-			colorize(colorSlide, "◆"),
-			count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
-		)
+		fmt.Fprintln(summary, slideSectionHeader(
+			count, ev.SlideID, front, ev.Path,
+			ev.TStartMs, ev.TEndMs-ev.TStartMs,
+		))
 
 		// Send slide to all specialist agents in parallel. If an agent
 		// hasn't finished starting yet, SendSlide queues internally or
