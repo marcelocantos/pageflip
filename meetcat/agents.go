@@ -350,11 +350,16 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 		WorkDir:   p.workDir,
 		Model:     spec.model,
 		SessionID: sessID,
-		// Load the specialist prompt as a system prompt so the agent
-		// boots with its role already configured. Sending it as a
-		// user message produces a preamble ("I'm ready to…") that
-		// clutters the stream before any slide has arrived.
-		ExtraArgs: []string{"--append-system-prompt", spec.prompt},
+		// Replace the default Claude Code system prompt with the
+		// specialist's own. Using --append-system-prompt instead
+		// leaves the "you are Claude Code" baseline dominant, which
+		// is why agents would respond "what would you like me to do?"
+		// — they were treating slide messages as ambiguous chat
+		// rather than analysis input. --system-prompt drops the
+		// general-coding-assistant framing so the role text takes.
+		// MCP tools and per-agent settings load normally; only the
+		// default prompt is overridden.
+		ExtraArgs: []string{"--system-prompt", spec.prompt},
 	})
 	if err != nil {
 		p.sink.SpecialistLine(spec.name, "", colorize(colorError, fmt.Sprintf("start error: %v", err)))
