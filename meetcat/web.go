@@ -319,6 +319,25 @@ func (s *webSink) SystemLine(text string) {
 	})
 }
 
+// autoDetectWebDir looks for a web/ directory next to the running
+// binary or in the current working directory and returns the first
+// one that contains index.html. Empty result means "no on-disk
+// copy found, use the embed". The check is cheap (two stats) and
+// runs once per server start.
+func autoDetectWebDir() string {
+	candidates := []string{}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "web"))
+	}
+	candidates = append(candidates, "web")
+	for _, c := range candidates {
+		if _, err := os.Stat(filepath.Join(c, "index.html")); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
 // startWebServer binds an HTTP listener on localhost (auto-port),
 // returns the public URL plus a shutdown function. The server hosts
 // these routes:
@@ -330,17 +349,19 @@ func (s *webSink) SystemLine(text string) {
 //   - GET /events      — SSE stream of webEvents
 //   - GET /slides/...  — slide PNGs from the work directory
 //
-// When webDir is non-empty, the static assets (HTML/CSS/JS) are
-// served from that directory on every request — refresh the tab to
-// pick up any edit. When webDir is empty, the embedded copy from
-// `go:embed web/*` is used. The dev-loop friction was unbearable
-// while everything was embed-only: a CSS tweak meant a Go rebuild
-// and a server restart, which dropped the SSE connection and lost
-// meeting state.
+// Static-asset resolution: if webDir is non-empty (--web-dir flag),
+// use it explicitly. Otherwise auto-detect <exe-dir>/web or ./web.
+// If neither is present, fall back to the `go:embed web/*` copy
+// compiled into the binary. The on-disk path streams every request
+// from disk so a CSS / JS / HTML edit shows up on tab reload — no
+// Go rebuild, no server restart, no SSE-reconnect dance.
 //
 // shutdown blocks until in-flight requests complete or a 2 s grace
 // timer expires, then closes the listener.
 func startWebServer(meetingID, workDir, webDir string, h *hub) (string, func(), error) {
+	if webDir == "" {
+		webDir = autoDetectWebDir()
+	}
 	readAsset := func(name string) ([]byte, error) {
 		if webDir != "" {
 			return os.ReadFile(filepath.Join(webDir, name))
