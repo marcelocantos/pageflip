@@ -580,6 +580,24 @@ targets:
     origin: manual
     discovered: 2026-04-14
     achieved: 2026-04-15
+  T30:
+    name: Specialists are organised into named modes; default mode is "attendee" tuned for watching others present
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - meetcat exposes a --mode flag accepting at least 'attendee' and 'presenter'. Default is 'attendee'.
+    - '''attendee'' mode loads a specialist set tuned for extracting value from someone else''s presentation. Starter set: notetaker (key points to remember), questions (what to ask the speaker), commitments (deadlines/decisions/assignees the speaker named), fact-check (claims worth verifying), dejargoniser (jargon glossary).'
+    - '''presenter'' mode loads the existing specialist set (skeptic, constructive, neutral, dejargoniser, contradictions) — the review-your-own-deck framing.'
+    - Each new attendee specialist has a system prompt under meetcat/prompts/ following the existing readImagePreamble + role + noPreambleRule pattern. Attendee prompts deliberately avoid critical framing (no 'this assumption needs checking') and instead emit observations the audience can act on.
+    - 'Each attendee specialist gets an emoji icon for the status bar / inline gutter. Suggested: 📝 notetaker, ❓ questions, ✅ commitments, 🔎 fact-check, 📖 dejargoniser.'
+    - The existing --specialists flag overrides the mode's default set so the operator can mix specialists across modes for one-off contexts.
+    - The web UI surfaces the mode at meeting start (initially via the manifest; ideally selectable from a dropdown later — a daemon-mode concern, not blocking here).
+    - manifest.go's Manifest schema gains a Mode field (omitted = 'attendee'); resume re-spawns the same set of specialists by default.
+    - Documentation in agents-guide.md (or equivalent) explains the two modes, lists the specialists in each, and tells users how to add a custom set via --specialists.
+    context: 'During v1 web-UI testing the operator observed that the existing specialists are implicitly biased toward "you are the presenter reviewing your own deck for improvement". They issue critical findings — assumptions to check, missing baselines, claims to ground — which is high-value when you''re refining material you own. But the more common usage is the opposite: you''re in the audience of someone else''s meeting and you want to extract notes, questions, commitments, and jargon from what''s being shown to you, not critique the deck. Splitting into named modes lets the same agent infrastructure serve both contexts without one shape compromising the other. attendee is the default because it''s the higher-frequency case; the existing presenter mode stays available for solo deck-review sessions. Architecturally this is a natural extension of the existing specialist registry — modes are just named slices of specialists; the tougher part is authoring strong attendee-mode prompts that produce useful output without slipping into critical framing. Originator: 2026-04-25 web-UI testing session.'
+    origin: discovered during web-UI testing session 2026-04-25
+    discovered: 2026-04-25
   T4:
     name: User can crop a sub-rectangle within a selected window and have it tracked as the window moves or resizes
     status: achieved
