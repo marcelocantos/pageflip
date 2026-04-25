@@ -176,13 +176,19 @@ type specialistState struct {
 	sessionID string
 	agent     *claudia.Agent
 	turnCount int
-	mu        sync.Mutex // guards turnCount and currentSlideID
+	mu        sync.Mutex // guards turnCount, currentSlideID, turnBuffer
 
 	// currentSlideID is the slide the worker is presently waiting on
 	// a response for. Set before agent.Send, cleared after
 	// WaitForResponse returns. Read by the OnEvent callback to label
 	// streaming token output with the right slide_id.
 	currentSlideID string
+
+	// turnBuffer accumulates the streaming chunks for the current
+	// turn. After WaitForResponse returns, processSlide emits the
+	// concatenated text via sink.SpecialistTurnDone so the TUI can
+	// render it as markdown. Reset before each new turn.
+	turnBuffer strings.Builder
 
 	// 🎯T23: per-specialist work queue. SendSlide pushes one job per
 	// slide; runSpecialistWorker drains it serially, calling Send +
@@ -209,8 +215,19 @@ type StreamSink interface {
 
 	// SpecialistLine emits one line of specialist output. slideID
 	// names the slide the specialist is currently processing, or ""
-	// for lifecycle messages (startup errors, etc.).
+	// for lifecycle messages (startup errors, etc.). The text comes
+	// in as the agent streams tokens — possibly mid-sentence — so
+	// implementations should treat each call as a stream chunk
+	// rather than a fully-formed line of analysis.
 	SpecialistLine(role, slideID, text string)
+
+	// SpecialistTurnDone signals that the specialist has finished
+	// streaming a complete response to the slide. fullText is the
+	// concatenation of every chunk seen via SpecialistLine for this
+	// turn. The TUI sink uses this to replace the raw streaming text
+	// with a glamour-rendered markdown block; the stderrSink ignores
+	// it since the chunks have already been written to the stream.
+	SpecialistTurnDone(role, slideID, fullText string)
 
 	// SpecialistReady signals that a specialist has finished booting
 	// and is now accepting slides. The TUI sink uses this to flip
@@ -249,6 +266,12 @@ func (s *stderrSink) OpenSection(_, header string) {
 
 func (s *stderrSink) SpecialistLine(role, _, text string) {
 	fmt.Fprintf(s.w, "%s %s\n", tag(role), text)
+}
+
+func (s *stderrSink) SpecialistTurnDone(_, _, _ string) {
+	// stderr already saw every chunk via SpecialistLine; nothing to
+	// re-render. The TUI sink overrides this to swap the raw
+	// streamed lines for a glamour-rendered markdown block.
 }
 
 func (s *stderrSink) SpecialistReady(role string) {
@@ -404,6 +427,7 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 		if ev.Type == "assistant" && ev.Text != "" {
 			st.mu.Lock()
 			slideID := st.currentSlideID
+			st.turnBuffer.WriteString(ev.Text)
 			st.mu.Unlock()
 			p.sink.SpecialistLine(spec.name, slideID, wrapURLs(ev.Text))
 		}
@@ -463,6 +487,7 @@ func (p *SessionPool) processSlide(ctx context.Context, st *specialistState, job
 
 	st.mu.Lock()
 	st.currentSlideID = job.slideID
+	st.turnBuffer.Reset()
 	st.mu.Unlock()
 	defer func() {
 		st.mu.Lock()
@@ -487,7 +512,13 @@ func (p *SessionPool) processSlide(ctx context.Context, st *specialistState, job
 	st.mu.Lock()
 	st.turnCount++
 	turnIdx := st.turnCount
+	fullText := st.turnBuffer.String()
+	st.turnBuffer.Reset()
 	st.mu.Unlock()
+
+	// Hand the complete turn text to the sink so the TUI can swap
+	// the raw streamed chunks for a glamour-rendered markdown block.
+	p.sink.SpecialistTurnDone(st.name, job.slideID, fullText)
 
 	// Session mode doesn't provide token counts or cost. Pass zeros.
 	p.logger.LogSpecialistTurn(st.name, turnIdx, durationMs, 0, 0, 0)

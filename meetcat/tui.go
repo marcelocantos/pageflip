@@ -33,6 +33,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -91,13 +92,25 @@ type tuiLineMsg struct {
 }
 
 // tuiAttributedLineMsg carries a specialist line that's tied to a
-// specific slide via its `[role | slide_id]` prefix. Routed into
-// that slide's section so output stays grouped per frame even when
-// a slow specialist completes turns out of order with respect to
-// newer slides.
+// specific slide and role. Routed into that slide's section so
+// output stays grouped per frame even when a slow specialist
+// completes turns out of order with respect to newer slides. The
+// role is needed so the model can replace these lines in bulk
+// once the turn finishes (tuiSpecialistTurnDoneMsg).
 type tuiAttributedLineMsg struct {
+	role    string
 	slideID string
 	line    string
+}
+
+// tuiSpecialistTurnDoneMsg signals that a specialist has finished
+// streaming a complete response. The TUI replaces the raw streamed
+// chunks in the matching section with a single glamour-rendered
+// markdown block.
+type tuiSpecialistTurnDoneMsg struct {
+	role    string
+	slideID string
+	text    string
 }
 
 // specialistState is the lifecycle state of one specialist. Used to
@@ -142,6 +155,16 @@ func tuiTickCmd() tea.Cmd {
 	})
 }
 
+// sectionLine is one entry inside a slide's grouped output. text may
+// span multiple lines (after a glamour render replaces a streamed
+// chunk run); the role tag lets the model find this entry on
+// SpecialistTurnDone so it can be replaced with the rendered
+// markdown.
+type sectionLine struct {
+	role string // specialist role; "" only for non-specialist lines (rare in sections)
+	text string // pre-formatted; may contain '\n'
+}
+
 // tuiSection holds one slide's grouped output: the section header
 // (a thick visual separator with the slide_id, count, and metadata)
 // plus every specialist line attributed to that slide_id, in
@@ -151,7 +174,7 @@ func tuiTickCmd() tea.Cmd {
 type tuiSection struct {
 	slideID string
 	header  string
-	lines   []string
+	lines   []sectionLine
 }
 
 // tuiNode is one renderable block in the viewport. Either a
@@ -232,6 +255,12 @@ func newTUIModel(meetingID string) tuiModel {
 // viewport. Sections render as: header line, then each attributed
 // line indented two spaces so the visual hierarchy is unmistakable.
 // Loose blocks render their lines verbatim with no indent.
+//
+// sectionLine.text may span multiple lines (after a glamour
+// markdown render replaces a streamed chunk run), so each entry is
+// split on '\n' before the indent is applied — otherwise only the
+// first physical line of a multi-line block would be indented and
+// the rest would extrude back to column 0.
 func (m *tuiModel) renderNodes() string {
 	var b strings.Builder
 	for i, n := range m.nodes {
@@ -242,9 +271,11 @@ func (m *tuiModel) renderNodes() string {
 		case n.section != nil:
 			b.WriteString(n.section.header)
 			for _, l := range n.section.lines {
-				b.WriteByte('\n')
-				b.WriteString("  ")
-				b.WriteString(l)
+				for _, sub := range strings.Split(l.text, "\n") {
+					b.WriteByte('\n')
+					b.WriteString("  ")
+					b.WriteString(sub)
+				}
 			}
 		default:
 			for j, l := range n.loose {
@@ -284,13 +315,62 @@ func (m *tuiModel) openSection(slideID, header string) {
 // If the slide hasn't been opened yet (race: agent emits before the
 // decode loop fires the slide-arrived msg), fall back to a loose
 // block so the line isn't lost.
-func (m *tuiModel) appendAttributed(slideID, line string) {
+func (m *tuiModel) appendAttributed(role, slideID, line string) {
 	i, ok := m.slideIdx[slideID]
 	if !ok {
 		m.appendLoose(line)
 		return
 	}
-	m.nodes[i].section.lines = append(m.nodes[i].section.lines, line)
+	m.nodes[i].section.lines = append(m.nodes[i].section.lines, sectionLine{role: role, text: line})
+}
+
+// renderMarkdown takes a specialist's full turn text and returns a
+// glamour-rendered version sized to the current viewport width.
+// The role tag is prepended on its own line so the operator still
+// knows whose output this block is — glamour by itself would
+// produce just the rendered analysis with no attribution. On
+// rendering error (rare; usually means glamour didn't like the
+// input), falls back to the plain text so nothing is lost.
+func (m *tuiModel) renderMarkdown(role, text string) string {
+	wrap := m.width - 4 // 2-space section indent + small right margin
+	if wrap < 20 {
+		wrap = 20
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(wrap),
+	)
+	if err != nil {
+		return tag(role) + "\n" + text
+	}
+	out, err := r.Render(text)
+	if err != nil {
+		return tag(role) + "\n" + text
+	}
+	return tag(role) + "\n" + strings.TrimRight(out, "\n")
+}
+
+// replaceSpecialistLines drops every sectionLine in the slide's
+// section that's tagged with the given role and appends a single
+// rendered block in their place. Called on SpecialistTurnDone so
+// the raw streaming chunks for a turn get swapped for one
+// glamour-rendered markdown block. If the slide isn't found the
+// rendered text is dropped on the floor — the streaming chunks
+// stay visible in their loose-block fallback, which is the right
+// degraded behaviour.
+func (m *tuiModel) replaceSpecialistLines(role, slideID, rendered string) {
+	i, ok := m.slideIdx[slideID]
+	if !ok {
+		return
+	}
+	sec := m.nodes[i].section
+	kept := sec.lines[:0]
+	for _, l := range sec.lines {
+		if l.role != role {
+			kept = append(kept, l)
+		}
+	}
+	sec.lines = append(kept, sectionLine{role: role, text: rendered})
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -334,7 +414,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tuiAttributedLineMsg:
-		m.appendAttributed(msg.slideID, msg.line)
+		m.appendAttributed(msg.role, msg.slideID, msg.line)
+		if m.ready {
+			m.viewport.SetContent(m.renderNodes())
+			m.viewport.GotoBottom()
+		}
+
+	case tuiSpecialistTurnDoneMsg:
+		rendered := m.renderMarkdown(msg.role, msg.text)
+		m.replaceSpecialistLines(msg.role, msg.slideID, rendered)
 		if m.ready {
 			m.viewport.SetContent(m.renderNodes())
 			m.viewport.GotoBottom()
@@ -457,7 +545,14 @@ func (s *tuiSink) SpecialistLine(role, slideID, text string) {
 		s.prog.Send(tuiLineMsg{line: line})
 		return
 	}
-	s.prog.Send(tuiAttributedLineMsg{slideID: slideID, line: line})
+	s.prog.Send(tuiAttributedLineMsg{role: role, slideID: slideID, line: line})
+}
+
+func (s *tuiSink) SpecialistTurnDone(role, slideID, fullText string) {
+	if slideID == "" || fullText == "" {
+		return
+	}
+	s.prog.Send(tuiSpecialistTurnDoneMsg{role: role, slideID: slideID, text: fullText})
 }
 
 func (s *tuiSink) SpecialistReady(role string) {
