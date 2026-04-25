@@ -27,6 +27,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -34,6 +35,39 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// sinkWriter is the io.Writer adapter slog uses to write structured
+// log lines into the TUI sink. Each Write splits its payload on '\n'
+// and forwards each non-empty line as a dim SystemLine so claudia's
+// startup chatter doesn't bypass the alt-screen and shred the
+// viewport from underneath.
+type sinkWriter struct {
+	sink StreamSink
+}
+
+func (sw sinkWriter) Write(p []byte) (int, error) {
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		sw.sink.SystemLine(colorize(colorDim, line))
+	}
+	return len(p), nil
+}
+
+// installSlogIntoSink redirects the global slog default to write
+// through the supplied StreamSink at WARN+ level. claudia's "agent
+// started" lines are INFO and would otherwise spam the viewport
+// during specialist startup; the session IDs they expose are also
+// persisted to session-ids.json for `meetcat attach`, so suppressing
+// them at INFO is safe. WARN/ERROR still surface — the operator
+// needs to see those.
+func installSlogIntoSink(sink StreamSink) {
+	h := slog.NewTextHandler(sinkWriter{sink: sink}, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})
+	slog.SetDefault(slog.New(h))
+}
 
 // tuiSlideArrivedMsg fires the moment runText sees a new validated
 // slide event — before pool.SendSlide is called. It increments the

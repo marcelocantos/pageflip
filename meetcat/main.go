@@ -241,6 +241,10 @@ func main() {
 	if enableAgents && stderrIsTTY() {
 		s, c, d := startTUI(meetingID)
 		sink, tuiCleanup, tuiDone = s, c, d
+		// Reroute the global slog default through the TUI sink and
+		// suppress INFO so claudia's per-agent startup chatter
+		// doesn't bypass the alt-screen and shred the viewport.
+		installSlogIntoSink(sink)
 	}
 
 	// Slide-event source:
