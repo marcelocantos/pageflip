@@ -28,6 +28,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -367,24 +368,63 @@ func (m *tuiModel) renderMarkdown(role, text string) string {
 	if err != nil {
 		return formatWithGutter(role, text)
 	}
-	return formatWithGutter(role, trimBlankLines(out))
+	return formatWithGutter(role, trimBlankLines(stripUnderline(out)))
 }
 
-// trimBlankLines strips lines that are entirely whitespace from the
-// top and bottom of `s`. Glamour's default style adds a top/bottom
-// margin which would otherwise leave the emoji gutter sitting alone
-// on a blank line above the actual content.
+// ansiAnyRe matches any ANSI escape sequence (CSI form). Used to
+// detect "visually empty" lines that nonetheless carry SGR resets,
+// hyperlink terminators, or other invisible payload — without this,
+// strings.TrimSpace classifies them as non-blank and the emoji
+// gutter ends up stranded on a line of its own.
+var ansiAnyRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07`)
+
+// ansiSGRRe captures one CSI ...m sequence so we can rewrite its
+// numeric parameter list. Used to strip the underline attribute,
+// which iTerm2 extends through trailing whitespace at the right of
+// each line — visible as a dashed hairline trailing past emphasised
+// text into the right margin.
+var ansiSGRRe = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
+
+// trimBlankLines strips lines that contain no visible content from
+// the top and bottom of `s`. Visibility is decided after scrubbing
+// ANSI escapes, so glamour's invisible top/bottom margin lines (made
+// of bare resets, etc.) are correctly classified as blank.
 func trimBlankLines(s string) string {
 	lines := strings.Split(s, "\n")
+	isBlank := func(l string) bool {
+		return strings.TrimSpace(ansiAnyRe.ReplaceAllString(l, "")) == ""
+	}
 	start := 0
-	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
+	for start < len(lines) && isBlank(lines[start]) {
 		start++
 	}
 	end := len(lines)
-	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+	for end > start && isBlank(lines[end-1]) {
 		end--
 	}
 	return strings.Join(lines[start:end], "\n")
+}
+
+// stripUnderline removes the SGR underline-on (4) and underline-off
+// (24) parameters from every CSI ...m sequence in s. Glamour's dark
+// style applies underline for some emphasis patterns; iTerm2 then
+// extends the underline through the trailing whitespace at the
+// right of word-wrapped lines, producing a hairline trail past the
+// last word. Suppressing underline entirely is the simplest fix —
+// emphasis still survives via colour and weight.
+func stripUnderline(s string) string {
+	return ansiSGRRe.ReplaceAllStringFunc(s, func(seq string) string {
+		// seq is the entire `\x1b[...m`; index 2..len-1 holds the params.
+		params := strings.Split(seq[2:len(seq)-1], ";")
+		kept := params[:0]
+		for _, p := range params {
+			if p == "4" || p == "24" {
+				continue
+			}
+			kept = append(kept, p)
+		}
+		return "\x1b[" + strings.Join(kept, ";") + "m"
+	})
 }
 
 // formatWithGutter prepends the specialist's emoji + a space to the
