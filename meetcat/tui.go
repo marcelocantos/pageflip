@@ -328,13 +328,18 @@ func (s *tuiSink) SystemLine(text string) {
 	s.prog.Send(tuiLineMsg{line: text})
 }
 
-// startTUI launches a bubbletea program in a goroutine and returns a
-// sink that routes streaming output into it, plus a cleanup function
-// that quits the TUI and blocks until the alt-screen has been
-// restored. The cleanup must run before any subsequent writes to
-// os.Stderr — otherwise the screen-restore races the writes and the
-// operator sees garbled output.
-func startTUI(meetingID string) (StreamSink, func()) {
+// startTUI launches a bubbletea program in a goroutine and returns:
+//   - sink: the StreamSink that routes lines into the program;
+//   - cleanup: a quit-and-wait function that's safe to call multiple
+//     times (idempotent — the second call returns the moment the
+//     first one's <-done observes the close);
+//   - done: closed when the program exits via any path (q, Ctrl-C,
+//     tuiQuitMsg, or program error). The caller watches it to drive
+//     a process-wide shutdown when the user quits the TUI from the
+//     keyboard — bubbletea catches Ctrl-C and exits its own loop,
+//     but the rest of the process (the stdin decode loop in
+//     particular) won't unblock unless we close stdin.
+func startTUI(meetingID string) (StreamSink, func(), <-chan struct{}) {
 	model := newTUIModel(meetingID)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 
@@ -348,5 +353,5 @@ func startTUI(meetingID string) (StreamSink, func()) {
 		prog.Send(tuiQuitMsg{})
 		<-done
 	}
-	return newTUISink(prog), cleanup
+	return newTUISink(prog), cleanup, done
 }

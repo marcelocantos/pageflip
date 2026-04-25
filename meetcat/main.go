@@ -233,7 +233,20 @@ func main() {
 	var tuiCleanup func()
 	meetingID := MeetingSessionID()
 	if *enableAgents && stderrIsTTY() {
-		sink, tuiCleanup = startTUI(meetingID)
+		s, c, done := startTUI(meetingID)
+		sink = s
+		tuiCleanup = c
+		// Watch for the user quitting the TUI from the keyboard
+		// (q / Ctrl-C). bubbletea exits its own event loop, but the
+		// stdin decode loop in runText is still blocked on Decode().
+		// Closing os.Stdin makes that read return os.ErrClosed (which
+		// runText treats as a clean EOF) so the deferred StopAll
+		// drains the agents and the process exits cleanly without a
+		// second Ctrl-C.
+		go func() {
+			<-done
+			_ = os.Stdin.Close()
+		}()
 	}
 
 	var pool *SessionPool
@@ -317,7 +330,11 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 	for {
 		var ev slideEvent
 		switch err := dec.Decode(&ev); {
-		case errors.Is(err, io.EOF):
+		case errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed):
+			// os.ErrClosed is the path the bubbletea watcher takes
+			// when the user quits the TUI: stdin is closed out from
+			// under us, the decoder's Read returns ErrClosed, we
+			// treat it as a clean EOF so the deferred StopAll runs.
 			logger.LogMeetingEnd(count, 0)
 			sink.SystemLine(fmt.Sprintf("%s processed %d slide event(s)",
 				colorize(colorSystem, "meetcat:"), count))
