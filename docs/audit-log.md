@@ -2,7 +2,7 @@
 
 ## 2026-04-26 — /release v0.2.0
 
-- **Commit**: `pending`
+- **Commit**: `17fbff3`
 - **Outcome**: First release after pageflip's "real product" milestone.
   Ships the web UI replacement for the bubbletea TUI, RMS-based dedup
   (replacing pHash), `meetcat resume` with manifest persistence,
