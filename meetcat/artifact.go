@@ -160,6 +160,13 @@ func (w *ArtifactWriter) WriteSessionIDs(ids map[string]string) error {
 }
 
 func (w *ArtifactWriter) writeSessionIDs(artifactDir string, ids map[string]string) error {
+	// Make sure the artifact dir exists. WriteSessionIDs is called at
+	// shutdown regardless of whether any slides were processed, so the
+	// dir may not have been created yet (e.g. the user pressed Escape
+	// in pageflip's picker before any frame was captured).
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir artifact dir: %w", err)
+	}
 	path := filepath.Join(artifactDir, "session-ids.json")
 
 	// Merge with existing content if present.
