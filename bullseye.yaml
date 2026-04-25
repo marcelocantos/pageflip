@@ -452,6 +452,116 @@ targets:
     origin: manual
     discovered: 2026-04-15
     achieved: 2026-04-15
+  T23:
+    name: Slide event loop is decoupled from specialist response latency
+    status: converging
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - meetcat reads and prints the next ◆ [N] line within ~1 capture interval of pageflip emitting it, regardless of how long the previous slide's specialists are still running
+    - pool.SendSlide returns without waiting for any agent.Send or WaitForResponse
+    - specialist responses still print in the order each specialist receives them (per-specialist serialisation preserved)
+    - StopAll cleanly drains in-flight queues without dropping the final responses
+    context: 'SendSlide refactored: each specialistState owns a slideQueueSize=1024 buffered channel; runSpecialistWorker drains it serially via Send + WaitForResponse. SendSlide pushes once per specialist under p.mu and returns. StopAll closes queues, waits on workersWG (so the final slide''s responses are flushed), then stops non-neutral agents. p.stopped guards against late SendSlide calls. Build/vet/tests green. Acceptance criteria 2, 3, 4 satisfied by construction; criterion 1 (meetcat reads next ◆ [N] within ~1 capture interval) needs real-meeting verification — same observable that T24 still owes — so leave at converging until a live session confirms both.'
+    origin: manual
+    discovered: 2026-04-25
+  T24:
+    name: macOS region capture reliably returns fresh frames on every tick
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - After advancing a presentation slide, pageflip's next capture tick sees the new pixels (dist > 0 in stderr diagnostics, OR ◆ [N] event emitted)
+    - Capture latency stays within the configured interval (default 1 s) on a typical M-series Mac
+    - 'No regression on multi-monitor setups: capture still finds the right monitor for the chosen region'
+    context: 'xcap 0.9.4 uses the deprecated CGWindowListCreateImage API on macOS, which returns stale cached pixels under sub-second polling on macOS 14+ (and apparently macOS 26). Symptom: presenter advances slide, pageflip continues to see dist=0 from the first frame for many seconds. Just shipped a workaround that shells out to /usr/sbin/screencapture (Apple''s own CLI, backed by ScreenCaptureKit). Need to verify it actually unsticks capture in real meetings, and decide whether to also vendor a direct screencapturekit-rs path to avoid the per-tick subprocess (~150 ms).'
+    origin: manual
+    discovered: 2026-04-25
+  T25:
+    name: Frames showing a participant's face (webcam takeover) are suppressed before they reach analysis
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - Frames where a face occupies more than the configured area fraction are dropped before reaching the front-end loader
+    - TUI/stderr shows a single dim line when a frame is suppressed, with the area fraction so the threshold can be tuned by inspection
+    - Slides containing small face icons or photos (e.g. team headshots) are NOT suppressed
+    - Detection adds <50 ms per frame on M-series hardware
+    context: 'At the end of slide decks, presenters often stop screen-sharing and the captured region fills with someone''s face. We don''t want those frames to be OCR''d, sent to the loader, or analysed by specialists — they''re noise. Use objc2-vision (already a dep) to run VNDetectFaceRectanglesRequest on each accepted frame; if the largest detected face exceeds ~15% of the frame area (or smaller threshold to be tuned), drop the frame at the pre-processor stage and log a dim "\u21b7 frame suppressed (face fills N%)" line. The face-area heuristic is preferred over face count: a small face-shaped logo on a slide must not be enough to suppress.'
+    depends_on:
+    - T23
+    - T24
+    origin: manual
+    discovered: 2026-04-25
+  T26:
+    name: Each slide event carries OCR text and word bboxes from Apple Vision
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - SlideEvent NDJSON includes an `ocr` object with `full_text` and a `words` array of {text, bbox}
+    - bbox is normalised to 0–1 in the slide's own coordinate space
+    - OCR runs only on frames that pass dedup AND face-gating (no wasted work)
+    - Loader's prompt receives the OCR text alongside the screenshot path
+    context: 'Specialists currently get a path and a phash; they have to guess at slide content from the filename and frontmost app. The mental model has a CV/OCR stage between capture and the front-end loader: pageflip enriches each accepted (non-face-gated) frame with VNRecognizeTextRequest output (full_text + per-word [text, bbox]) and emits it as part of the SlideEvent NDJSON. Loader and specialists then have grounded text to reason over. Apple Vision (objc2-vision crate, already pulled in for face blur) is the right primitive — fast, no network, no model download.'
+    depends_on:
+    - T23
+    - T24
+    origin: manual
+    discovered: 2026-04-25
+  T27:
+    name: A long-running front-end loader agent emits a canonical semantic bundle for each slide
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - A new claudia session named `loader` boots alongside the specialists and persists across slides
+    - For every accepted slide event, the loader produces a JSON bundle with the documented schema (slide_label, label_source, title, subtitle, content_summary, etc.)
+    - 'label_source is one of: "page_number", "title", "sequential"'
+    - Specialists receive the bundle as their input message (not the raw event)
+    - The screenshot is referenced by file path in the prompt, not base64
+    context: 'Between the OCR-enriched event and the specialists, a new claudia session ("loader") receives the screenshot path + OCR + accumulated prior-slide context, and returns a structured bundle: slide_label (page number if visible, else short title-derived phrase, else sequential #N) + label_source, title, subtitle, speaker, content_summary, bullets[], figures[], raw_text. The loader is long-running so its session memory accumulates context across the meeting (helping it pick stable labels and detect "this is a follow-on from the last slide"). Specialists consume the bundle, NOT the raw event. The bundle''s slide_label becomes the grouping key for output.'
+    depends_on:
+    - T26
+    origin: manual
+    discovered: 2026-04-25
+  T28:
+    name: Specialist output lines are prefixed with the slide_label so a downstream consumer can re-group
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - Every specialist output line begins with `[role | slide_label]`
+    - 'Crash and timeout lines use the same prefix and explicitly name the failure mode (`crashed: …`, `timed-out after Ns`)'
+    - '`↺` revisit lines and `↷` face-suppressed lines also carry slide_label or a short reason, so the prefix is uniform across event types'
+    - Existing log output (LogSpecialistTurn, etc.) is unchanged; this is a stderr/UX concern only
+    context: 'Phase-1 output mode is pipe-friendly: each specialist''s line streams as soon as it arrives. To make that consumable downstream, prefix every line with `[role | slide_label]` instead of just `[role]`. Errors inline: `[skeptic | Slide 2 of 24] (crashed: ...)` or `(timed-out after 60s)`. End-of-meeting summary unchanged.'
+    depends_on:
+    - T27
+    origin: manual
+    discovered: 2026-04-25
+  T29:
+    name: TTY mode buffers per slide and prints the whole group atomically when the last specialist responds (phase 2)
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - When stdout is a TTY, each slide's output appears as a single grouped block (header line + one section per specialist)
+    - Slow specialists do not delay the printing of *earlier* slides' groups (each slide's group prints when its own specialists complete)
+    - Crashes and timeouts appear inside the group with a clear marker
+    - When stdout is not a TTY, behaviour is identical to 🎯T28 streaming output (no grouping, no buffering)
+    context: Phase 2 of the output split. When stdout is a TTY, hold each slide's specialist responses in memory and print the entire grouped block once the slowest specialist for that slide finishes (or times out). Pipe / non-TTY mode keeps the streaming `[role | label]` format from \ud83c\udfafT28. Likely needs a TUI framework again (Bubble Tea was retired in favour of plain text; this re-introduces it for grouped rendering only). Crashes/timeouts surface inside the group, not as a separate stream. Deferred until phase-1 plumbing is solid.
+    depends_on:
+    - T28
+    origin: manual
+    discovered: 2026-04-25
   T3:
     name: pageflip can target a specific window and keep capturing it when backgrounded (macOS)
     status: achieved
@@ -470,6 +580,39 @@ targets:
     origin: manual
     discovered: 2026-04-14
     achieved: 2026-04-15
+  T30:
+    name: Specialists are organised into named modes; default mode is "attendee" tuned for watching others present
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - meetcat exposes a --mode flag accepting at least 'attendee' and 'presenter'. Default is 'attendee'.
+    - '''attendee'' mode loads a specialist set tuned for extracting value from someone else''s presentation. Starter set: notetaker (key points to remember), questions (what to ask the speaker), commitments (deadlines/decisions/assignees the speaker named), fact-check (claims worth verifying), dejargoniser (jargon glossary).'
+    - '''presenter'' mode loads the existing specialist set (skeptic, constructive, neutral, dejargoniser, contradictions) — the review-your-own-deck framing.'
+    - Each new attendee specialist has a system prompt under meetcat/prompts/ following the existing readImagePreamble + role + noPreambleRule pattern. Attendee prompts deliberately avoid critical framing (no 'this assumption needs checking') and instead emit observations the audience can act on.
+    - 'Each attendee specialist gets an emoji icon for the status bar / inline gutter. Suggested: 📝 notetaker, ❓ questions, ✅ commitments, 🔎 fact-check, 📖 dejargoniser.'
+    - The existing --specialists flag overrides the mode's default set so the operator can mix specialists across modes for one-off contexts.
+    - The web UI surfaces the mode at meeting start (initially via the manifest; ideally selectable from a dropdown later — a daemon-mode concern, not blocking here).
+    - manifest.go's Manifest schema gains a Mode field (omitted = 'attendee'); resume re-spawns the same set of specialists by default.
+    - Documentation in agents-guide.md (or equivalent) explains the two modes, lists the specialists in each, and tells users how to add a custom set via --specialists.
+    context: 'During v1 web-UI testing the operator observed that the existing specialists are implicitly biased toward "you are the presenter reviewing your own deck for improvement". They issue critical findings — assumptions to check, missing baselines, claims to ground — which is high-value when you''re refining material you own. But the more common usage is the opposite: you''re in the audience of someone else''s meeting and you want to extract notes, questions, commitments, and jargon from what''s being shown to you, not critique the deck. Splitting into named modes lets the same agent infrastructure serve both contexts without one shape compromising the other. attendee is the default because it''s the higher-frequency case; the existing presenter mode stays available for solo deck-review sessions. Architecturally this is a natural extension of the existing specialist registry — modes are just named slices of specialists; the tougher part is authoring strong attendee-mode prompts that produce useful output without slipping into critical framing. Originator: 2026-04-25 web-UI testing session.'
+    origin: discovered during web-UI testing session 2026-04-25
+    discovered: 2026-04-25
+  T31:
+    name: When the captured region is showing video, dedup auto-suspends so the analysis pipeline isn't drowned in frames
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - When N consecutive captures all cross the dedup threshold (every frame is being saved), pageflip enters a 'video detected' mode that suspends specialist dispatch — slides aren't emitted to meetcat while the rolling-window detection is true.
+    - 'The video-detection signal is rolling: once consecutive frames again fall below threshold (i.e. the screen is static again), normal slide capture resumes.'
+    - Configurable via a flag (e.g. --video-window N, default 5–10) and an opt-out flag (--no-video-suspend) for users who want every captured frame.
+    - An stderr / system-line message is emitted on entering and leaving video mode so the operator understands why slides stopped flowing.
+    - 'Optional: also auto-pause the meetcat-side specialist pool while in video mode so token spend doesn''t spike. Or: pageflip just stops emitting events and meetcat is none the wiser.'
+    - Tests cover the rolling-window enter/exit transitions with synthetic frame sequences.
+    context: 'Once dedup is rebuilt on RMS pixel difference (🎯T31), a presenter who plays a video clip (or any continuously-changing content like a webcam feed embedded in a slide) will produce a stream of frames that all cross the threshold. Each one triggers full specialist analysis — five LLM round-trips per second — which is wasteful (most of those frames aren''t worth analysing on their own) and noisy (the operator''s web view fills with near-duplicate cards). Detection: a rolling window of the last N captures; if all are ''save'' decisions, treat it as video and suspend emission until the rate drops. This is one place where some heuristic on top of the simple RMS gate genuinely earns its keep. Originator: 2026-04-26 dedup redesign discussion (during pHash → RMS migration).'
+    origin: forked-from 🎯T31 (pHash → RMS dedup, 2026-04-26)
+    discovered: 2026-04-26
   T4:
     name: User can crop a sub-rectangle within a selected window and have it tracked as the window moves or resizes
     status: achieved

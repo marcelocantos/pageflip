@@ -20,15 +20,16 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/marcelocantos/claudia"
+	"time"
 )
 
-const version = "0.0.1"
+const version = "0.2.0"
 
 // gitSHA is optionally set at link time via:
 //
@@ -96,6 +97,7 @@ type slideEvent struct {
 	Path             string          `json:"path"`
 	TStartMs         uint64          `json:"t_start_ms"`
 	TEndMs           uint64          `json:"t_end_ms"`
+	PHash            string          `json:"phash,omitempty"`
 	OCR              json.RawMessage `json:"ocr,omitempty"`
 	TranscriptWindow json.RawMessage `json:"transcript_window,omitempty"`
 	FrontmostApp     string          `json:"frontmost_app,omitempty"`
@@ -132,15 +134,16 @@ func writeSessionIDsIfPossible(pool *SessionPool, w io.Writer) {
 	}
 }
 
-// printNeutralAttachHint prints the command to re-attach to the neutral
-// session on stderr so the user knows how to resume (🎯T15).
-func printNeutralAttachHint(pool *SessionPool, w io.Writer) {
-	neutral := pool.NeutralAgent()
-	if neutral == nil {
+// printResumeHint tells the operator the one command they need to
+// pick up where the meeting left off. Every specialist's Claude Code
+// session is persisted by JSONL, so resume reconstructs all five
+// from a single meeting ID.
+func printResumeHint(pool *SessionPool, w io.Writer) {
+	if pool == nil {
 		return
 	}
-	fmt.Fprintf(w, "\nmeetcat: neutral session still alive — to resume:\n")
-	fmt.Fprintf(w, "  meetcat attach --meeting %s neutral\n", pool.meetingID)
+	fmt.Fprintf(w, "\nmeetcat: meeting saved. To resume:\n")
+	fmt.Fprintf(w, "  meetcat resume %s\n", pool.meetingID)
 }
 
 func main() {
@@ -160,26 +163,16 @@ func main() {
 			runGlossarySubcommand(os.Args[2:])
 			return
 		case "attach":
-			attachFlags := flag.NewFlagSet("attach", flag.ExitOnError)
-			meetingID := attachFlags.String("meeting", "", "Meeting session ID (meetcat-<timestamp>).")
-			if err := attachFlags.Parse(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "meetcat attach:", err)
-				os.Exit(2)
-			}
-			args := attachFlags.Args()
-			if len(args) != 1 {
-				fmt.Fprintln(os.Stderr, "usage: meetcat attach [--meeting <id>] <specialist>")
-				os.Exit(2)
-			}
-			specialist := args[0]
-			if *meetingID == "" {
-				fmt.Fprintln(os.Stderr, "meetcat attach: --meeting <id> is required")
-				os.Exit(2)
-			}
-			sessID := specialistSessionID(*meetingID, specialist)
-			fmt.Printf("# Attach to specialist %q (session: %s)\n", specialist, sessID)
-			fmt.Printf("# Start meetcat, then run:\n")
-			fmt.Printf("tmux -L claudia attach-session -t %s\n", sessID)
+			// Legacy attach printed a `tmux ... attach` command that
+			// only worked while neutral was kept alive. With every
+			// specialist torn down at meeting end (and resume taking
+			// over via JSONL persistence), tmux attach is no longer
+			// the right primitive. Print a clear redirect.
+			fmt.Fprintln(os.Stderr, "meetcat attach is deprecated — use `meetcat resume <meeting-id>`")
+			fmt.Fprintln(os.Stderr, "(All specialists' sessions persist via Claude Code JSONL; resume re-spawns them with their accumulated context.)")
+			os.Exit(2)
+		case "resume":
+			runResume(os.Args[2:])
 			return
 		}
 	}
@@ -188,11 +181,18 @@ func main() {
 	showHelp := flag.Bool("help", false, "Print help and exit.")
 	showHelpAgent := flag.Bool("help-agent", false, "Print machine-readable help and exit.")
 	logFile := flag.String("log-file", "", "Path to write NDJSON session log (append, created if absent).")
-	enableAgents := flag.Bool("agents", false, "Spawn claudia specialist sessions for each slide.")
+	noAgents := flag.Bool("no-agents", false, "Disable claudia specialist sessions (decode-only mode).")
 	workDir := flag.String("work-dir", ".", "Working directory passed to claudia agents.")
 	specialistsFlag := flag.String("specialists", "", "Comma-separated list of specialists to start (default: all). E.g. skeptic,neutral")
 	glossaryCachePath := flag.String("glossary-cache", defaultGlossaryCachePath(), "Path to glossary JSON cache.")
+	noSpawn := flag.Bool("no-spawn", false, "Don't spawn pageflip; read slide events from stdin instead.")
+	regionFlag := flag.String("region", "", "Forwarded to pageflip as --region X,Y,W,H. Omit to run the multi-monitor picker.")
+	windowFlag := flag.Bool("window", false, "Forwarded to pageflip as --window (interactive window picker).")
+	windowTitleFlag := flag.String("window-title", "", "Forwarded to pageflip as --window-title SUBSTRING.")
+	windowIDFlag := flag.String("window-id", "", "Forwarded to pageflip as --window-id ID.")
+	webDirFlag := flag.String("web-dir", "", "Dev-only: serve HTML/CSS/JS from this directory instead of the embedded copy. Reload the tab to pick up edits.")
 	flag.Parse()
+	enableAgents := !*noAgents
 
 	switch {
 	case *showVersion:
@@ -218,79 +218,315 @@ func main() {
 		defer f.Close()
 	}
 
-	// Load glossary cache (best-effort; errors are printed but don't abort).
-	var glossary *GlossaryCache
-	if *glossaryCachePath != "" {
-		var err error
-		glossary, err = NewGlossaryCache(*glossaryCachePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "meetcat: glossary cache: %v (continuing without)\n", err)
-			glossary = nil
-		}
+	cfg := meetingConfig{
+		MeetingID:     MeetingSessionID(),
+		WorkDir:       *workDir,
+		GlossaryCache: *glossaryCachePath,
+		AllowedNames:  ParseSpecialistNames(*specialistsFlag),
+		EnableAgents:  enableAgents,
+		NoSpawn:       *noSpawn,
+		Pageflip: PageflipArgs{
+			Region:      *regionFlag,
+			Window:      *windowFlag,
+			WindowTitle: *windowTitleFlag,
+			WindowID:    *windowIDFlag,
+		},
+		Logger:      logger,
+		OpenBrowser: true,
+		WebDir:      *webDirFlag,
 	}
 
-	var pool *SessionPool
-	if *enableAgents {
-		meetingID := MeetingSessionID()
-		allowedNames := ParseSpecialistNames(*specialistsFlag)
-		pool = NewSessionPool(meetingID, *workDir, os.Stderr, logger, allowedNames, glossary)
-	}
-
-	if err := run(context.Background(), os.Stdin, os.Stderr, logger, pool); err != nil {
+	if err := runMeeting(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "meetcat:", err)
 		os.Exit(1)
 	}
 }
 
-// isTTY reports whether f is connected to an interactive terminal.
-func isTTY(f *os.File) bool {
-	fi, err := f.Stat()
+// meetingConfig is the resolved configuration for one meeting run.
+// Both the fresh-meeting path (main) and the resume path (runResume)
+// build it and hand it to runMeeting, which owns the TUI / pageflip /
+// pool lifecycle.
+type meetingConfig struct {
+	MeetingID     string
+	WorkDir       string
+	GlossaryCache string
+	AllowedNames  map[string]bool
+	EnableAgents  bool
+	NoSpawn       bool
+	Pageflip      PageflipArgs
+	Logger        *Logger
+
+	// OpenBrowser controls whether runMeeting auto-opens the user's
+	// default browser at the meetcat web URL. Fresh meetings set it
+	// true; resume sets it false because the operator's existing
+	// browser tab is still open from the prior run and will auto-
+	// reconnect via EventSource — opening a new tab would compete
+	// with that one for focus.
+	OpenBrowser bool
+
+	// WebDir is the dev-only path from which to serve HTML/CSS/JS.
+	// Empty means use the embedded copy compiled into the binary.
+	WebDir string
+}
+
+// runMeeting wires up the TUI, spawns pageflip (or reads stdin),
+// boots the specialist pool, drives the slide-event decode loop, and
+// shuts everything down cleanly. The same code path serves a fresh
+// meeting and a resumed one — only the meeting ID + per-specialist
+// JSONL persistence make resume "do the right thing" via claudia's
+// auto-detect.
+func runMeeting(cfg meetingConfig) error {
+	// Load glossary cache (best-effort; errors are noted but don't abort).
+	var glossary *GlossaryCache
+	if cfg.GlossaryCache != "" {
+		g, err := NewGlossaryCache(cfg.GlossaryCache)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "meetcat: glossary cache: %v (continuing without)\n", err)
+		} else {
+			glossary = g
+		}
+	}
+
+	// Web mode: when agents are enabled and stderr is a TTY, meetcat
+	// serves a local HTTP/SSE page and opens it in the browser. The
+	// page renders specialist output as proper markdown and embeds
+	// each slide's PNG inline next to the analysis — neither of
+	// which the terminal could do well.
+	var sink StreamSink = newStderrSink(os.Stderr)
+	var webShutdown func()
+	if cfg.EnableAgents && stderrIsTTY() {
+		absWork, err := filepath.Abs(cfg.WorkDir)
+		if err != nil {
+			return fmt.Errorf("resolve work dir: %w", err)
+		}
+		h := newHub()
+		url, shutdown, err := startWebServer(cfg.MeetingID, absWork, cfg.WebDir, h)
+		if err != nil {
+			return fmt.Errorf("start web server: %w", err)
+		}
+		sink = newWebSink(h, absWork)
+		webShutdown = shutdown
+		fmt.Fprintf(os.Stderr, "meetcat: open %s in your browser (Ctrl-C to stop)\n", url)
+		if cfg.OpenBrowser {
+			_ = openInBrowser(url)
+		}
+	}
+
+	// Persist the manifest as early as possible so an immediate
+	// Ctrl-C still leaves enough state on disk for `meetcat resume`
+	// to pick up. The manifest dir is also where session-ids.json
+	// will land at meeting end.
+	manifest := Manifest{
+		SchemaVersion: currentManifestSchema,
+		MeetingID:     cfg.MeetingID,
+		CreatedAt:     time.Now().UTC(),
+		WorkDir:       cfg.WorkDir,
+		GlossaryCache: cfg.GlossaryCache,
+		Specialists:   sortedAllowedNames(cfg.AllowedNames),
+		Pageflip:      cfg.Pageflip,
+	}
+	if err := WriteManifest(cfg.WorkDir, manifest); err != nil {
+		// Manifest write failure is loud but not fatal — the meeting
+		// can still proceed; resume just won't be available later.
+		fmt.Fprintf(os.Stderr, "meetcat: manifest write failed: %v (resume will not be available)\n", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Slide-event source: pipe pageflip's stdout through unless the
+	// caller has explicitly opted out (--no-spawn) or stdin is
+	// already a pipe (CI / tests).
+	var eventStream io.Reader = os.Stdin
+	var pageflipCleanup func()
+	if !cfg.NoSpawn && stdinIsTTY() {
+		stream, cleanup, err := spawnPageflip(ctx, sink, cfg.Pageflip.toFlags())
+		if err != nil {
+			return err
+		}
+		eventStream = stream
+		pageflipCleanup = cleanup
+	}
+
+	// Terminal Ctrl-C propagates to a process shutdown: cancel the
+	// context (SIGTERMs pageflip via cmd.Cancel so its stdout closes
+	// and our decoder hits EOF) and close stdin as a fallback for
+	// the --no-spawn case. The web tab will see the SSE connection
+	// drop and stop receiving events.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+			_ = os.Stdin.Close()
+		case <-ctx.Done():
+		}
+	}()
+
+	var pool *SessionPool
+	if cfg.EnableAgents {
+		pool = NewSessionPool(cfg.MeetingID, cfg.WorkDir, sink, cfg.Logger, cfg.AllowedNames, glossary)
+	}
+
+	runErr := run(ctx, eventStream, sink, cfg.Logger, pool)
+
+	// Shutdown: kill pageflip, then close the web server (stops
+	// SSE), then the post-meeting writes (session IDs, resume hint)
+	// land on the real stderr.
+	if pageflipCleanup != nil {
+		pageflipCleanup()
+	}
+	if webShutdown != nil {
+		webShutdown()
+	}
+	if pool != nil {
+		writeSessionIDsIfPossible(pool, os.Stderr)
+		printResumeHint(pool, os.Stderr)
+	}
+	return runErr
+}
+
+// sortedAllowedNames returns the map keys in canonical order so the
+// manifest's `specialists` field is stable across runs (otherwise
+// the JSON diff churns on Go's map-iteration order). Returns nil
+// when the allow set is empty (semantics: "all specialists").
+func sortedAllowedNames(allow map[string]bool) []string {
+	if len(allow) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(allow))
+	for name := range allow {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// runResume loads a manifest and re-runs the meeting with the same
+// configuration. The per-specialist Claude Code sessions auto-resume
+// because their session IDs are deterministic from (meeting_id,
+// role) and the underlying JSONLs persist across runs.
+func runResume(args []string) {
+	resumeFlags := flag.NewFlagSet("resume", flag.ExitOnError)
+	if err := resumeFlags.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat resume:", err)
+		os.Exit(2)
+	}
+	rest := resumeFlags.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: meetcat resume <meeting-id-or-dir>")
+		os.Exit(2)
+	}
+	target := rest[0]
+
+	// Accept both "meetcat-1234" (a bare ID, looked up under cwd) and
+	// "path/to/meetcat-1234" (an explicit directory). Either way,
+	// resolve the manifest under that directory.
+	manifestDir := target
+	if _, err := os.Stat(manifestDir); err != nil {
+		// Fall back to interpreting target as a bare ID under cwd.
+		manifestDir = filepath.Join(".", target)
+	}
+	manifest, err := ReadManifest(manifestDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "meetcat resume: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Logger is not currently persisted in the manifest — a future
+	// extension could carry the original --log-file path. Resume
+	// runs without a session log unless the caller pipes one in via
+	// the (still-supported) -log-file on the resume invocation.
+	cfg := meetingConfig{
+		MeetingID:     manifest.MeetingID,
+		WorkDir:       manifest.WorkDir,
+		GlossaryCache: manifest.GlossaryCache,
+		AllowedNames:  namesToSet(manifest.Specialists),
+		EnableAgents:  true, // resume is meaningless without agents
+		NoSpawn:       false,
+		Pageflip:      manifest.Pageflip,
+	}
+
+	fmt.Fprintf(os.Stderr, "meetcat: resuming meeting %s (work_dir=%s)\n", cfg.MeetingID, cfg.WorkDir)
+	if err := runMeeting(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "meetcat resume:", err)
+		os.Exit(1)
+	}
+}
+
+func namesToSet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
+}
+
+// stdinIsTTY reports whether stdin is connected to an interactive
+// terminal (not a pipe or redirected file). Used to decide whether
+// meetcat should spawn pageflip itself or consume the existing pipe.
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
 	if err != nil {
 		return false
 	}
-	if fi.Mode()&os.ModeCharDevice == 0 {
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// run processes the slide-event stream from in, routing every line
+// of output through the supplied sink. pool, if non-nil, receives
+// each validated slide event for specialist analysis. logger may be
+// nil (no-op). The caller owns TUI / pageflip lifecycle — run is
+// straight-line decode + dispatch.
+func run(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool) error {
+	return runText(ctx, in, sink, logger, pool)
+}
+
+// stderrIsTTY reports whether stderr is connected to an interactive
+// terminal. Used to decide whether to launch the bubbletea TUI; piped
+// stderr (CI, `meetcat 2>log`, tests) falls back to the streaming
+// path so output stays grep- and tee-friendly.
+func stderrIsTTY() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
 		return false
 	}
-	_, ok := fi.Sys().(*syscall.Stat_t)
-	return ok
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// run processes the slide-event stream from in, writing a summary to
-// summary. pool, if non-nil, receives each validated slide event for
-// specialist analysis. logger may be nil (no-op).
-//
-// When in is a TTY and pool is non-nil, run launches the bubbletea TUI.
-// Otherwise it falls back to line-by-line stderr mode for CI / pipe use.
-func run(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
-	useTUI := false
-	if pool != nil {
-		if f, ok := in.(*os.File); ok {
-			useTUI = isTTY(f)
-		}
-	}
-	if useTUI {
-		return runTUI(ctx, in, summary, logger, pool)
-	}
-	return runText(ctx, in, summary, logger, pool)
-}
-
-// runText is the original line-by-line mode. Used when not on a TTY,
-// when agents are disabled, or in tests.
-func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
+// runText reads slide events from in and routes every line of output
+// through sink. Lifecycle of any TUI / spawned pageflip is owned by
+// the caller; runText only knows about the event stream and the
+// specialist pool.
+func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool) error {
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
-	firstEvent := true
+	// Revisit detection by per-pixel RMS diff against every prior
+	// accepted slide. Threshold 5 means "mean per-channel difference
+	// ≤ 5 on the 0–255 scale" — comfortably above cursor drift and
+	// PNG compression noise (≤1) but well below the distance to a
+	// meaningfully different slide (typically 20+).
+	revisits := newRevisitTracker(5.0)
 
 	if pool != nil {
+		// Start all specialist agents immediately, in parallel, in a
+		// goroutine — do not wait for the first slide. This gives users
+		// a visible stream of "[skeptic] ready" etc. lines as soon as
+		// meetcat launches, instead of a silent wait.
+		go pool.StartAll(ctx)
+
 		defer func() {
 			pool.StopAll()
-			writeSessionIDsIfPossible(pool, os.Stderr)
-			printNeutralAttachHint(pool, os.Stderr)
 			ts := pool.TurnSummary()
-			fmt.Fprintln(summary, "meetcat: specialist turn counts:")
+			sink.SystemLine(fmt.Sprintf("%s specialist turn counts:",
+				colorize(colorSystem, "meetcat:")))
 			for name, n := range ts {
-				fmt.Fprintf(summary, "  %s: %d\n", name, n)
+				sink.SystemLine(fmt.Sprintf("  %s %d", tag(name), n))
 			}
 		}()
 	}
@@ -298,9 +534,14 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 	for {
 		var ev slideEvent
 		switch err := dec.Decode(&ev); {
-		case errors.Is(err, io.EOF):
+		case errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed):
+			// os.ErrClosed is the path the bubbletea watcher takes
+			// when the user quits the TUI: stdin is closed out from
+			// under us, the decoder's Read returns ErrClosed, we
+			// treat it as a clean EOF so the deferred StopAll runs.
 			logger.LogMeetingEnd(count, 0)
-			fmt.Fprintf(summary, "meetcat: processed %d slide event(s)\n", count)
+			sink.SystemLine(fmt.Sprintf("%s processed %d slide event(s)",
+				colorize(colorSystem, "meetcat:"), count))
 			return nil
 		case err != nil:
 			logger.LogRejected("decode_error")
@@ -317,134 +558,49 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 		logger.LogValidated(ev.SlideID)
 		count++
 
-		// On first slide, spawn agents (if pool configured).
-		if pool != nil && firstEvent {
-			firstEvent = false
-			pool.StartAll(ctx)
-		}
-
 		front := ev.FrontmostApp
 		if front == "" {
 			front = "-"
 		}
-		fmt.Fprintf(
-			summary,
-			"[%d] %s (t=%dms, dur=%dms, app=%s) %s\n",
-			count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
-		)
+		revisit, firstIdx, dist, rerr := revisits.classify(ev.Path)
+		if rerr != nil {
+			sink.SystemLine(fmt.Sprintf("%s slide [%d] revisit-detect error: %v (treating as new)",
+				colorize(colorSystem, "meetcat:"), count, rerr))
+		}
+		if revisit {
+			sink.SystemLine(fmt.Sprintf(
+				"%s [%d] %s (t=%dms, dur=%dms, app=%s) %s %s",
+				colorize(colorDim, "↺"),
+				count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
+				colorize(colorDim, fmt.Sprintf("← slide %d (rms=%.2f)", firstIdx+1, dist)),
+			))
+			continue
+		}
+		// Log the closest-prior-slide RMS for non-revisit slides too, so
+		// the operator can tune the threshold against real-meeting data.
+		// dist is NaN when there were no priors to compare against.
+		if !math.IsNaN(dist) {
+			sink.SystemLine(fmt.Sprintf("%s slide [%d] closest-prior-slide RMS: %.2f",
+				colorize(colorSystem, "meetcat:"), count, dist))
+		}
+		// OpenSection feeds both the web view (which uses imagePath
+		// to compute a clean /slides/* URL) and the stderr fallback
+		// (which just prints the header). imagePath is the absolute
+		// path to the captured PNG; the web sink rebases it under
+		// the meeting work_dir to build a serveable URL.
+		sink.OpenSection(ev.SlideID, slideSectionHeader(
+			count, ev.SlideID, front, ev.Path,
+			ev.TStartMs, ev.TEndMs-ev.TStartMs,
+		), ev.Path)
 
-		// Send slide to all specialist agents in parallel.
+		// Send slide to all specialist agents in parallel. SendSlide
+		// returns immediately after queueing per 🎯T23.
 		if pool != nil {
 			pool.SendSlide(ctx, &ev)
 		}
 	}
 }
 
-// runTUI starts the bubbletea TUI. It feeds slide events and specialist
-// token events into the model and returns when the meeting ends or the
-// user presses q.
-func runTUI(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
-	specs := allSpecialists()
-	m := newTUIModel(pool.meetingID, specs)
-
-	// msgCh carries tea.Msg values from background goroutines into the
-	// bubbletea program. Closed by the slide-decoder goroutine on exit.
-	msgCh := make(chan tea.Msg, 256)
-
-	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(os.Stdin))
-
-	// Relay messages from msgCh into bubbletea.
-	go func() {
-		for msg := range msgCh {
-			prog.Send(msg)
-		}
-	}()
-
-	// Slide-decoder goroutine: reads NDJSON, validates, feeds TUI and pool.
-	go func() {
-		dec := json.NewDecoder(bufio.NewReader(in))
-		count := 0
-		firstEvent := true
-
-		defer func() {
-			logger.LogMeetingEnd(count, 0)
-			pool.StopAll()
-			writeSessionIDsIfPossible(pool, os.Stderr)
-			printNeutralAttachHint(pool, os.Stderr)
-			close(msgCh)
-			prog.Send(tuiStopMsg{})
-		}()
-
-		for {
-			var ev slideEvent
-			switch err := dec.Decode(&ev); {
-			case errors.Is(err, io.EOF):
-				return
-			case err != nil:
-				logger.LogRejected("decode_error")
-				return
-			}
-
-			logger.LogReceived(ev.SlideID, "")
-			if err := ev.validate(); err != nil {
-				logger.LogRejected("validation_failed")
-				return
-			}
-			logger.LogValidated(ev.SlideID)
-			count++
-
-			evCopy := ev
-			msgCh <- tuiSlideMsg{ev: &evCopy}
-
-			if firstEvent {
-				firstEvent = false
-				// Start agents and wire token hooks to feed the TUI.
-				// pool.StartAll installs stderr-based OnEvent handlers;
-				// we immediately replace them with TUI-forwarding handlers.
-				pool.StartAll(ctx)
-				wireTokenHooks(pool, msgCh)
-			}
-			pool.SendSlide(ctx, &evCopy)
-		}
-	}()
-
-	if _, err := prog.Run(); err != nil {
-		return fmt.Errorf("tui: %w", err)
-	}
-
-	// Print text summary after TUI exits.
-	ts := pool.TurnSummary()
-	fmt.Fprintln(summary, "meetcat: specialist turn counts:")
-	for name, n := range ts {
-		fmt.Fprintf(summary, "  %s: %d\n", name, n)
-	}
-	return nil
-}
-
-// wireTokenHooks replaces each specialist agent's OnEvent handler with
-// one that forwards token text and turn-done signals into msgCh. Must be
-// called after pool.StartAll — agents must exist before OnEvent is set.
-// OnEvent replaces the previous handler (one at a time), which is
-// intentional: the TUI channel supersedes the stderr fallback.
-func wireTokenHooks(pool *SessionPool, msgCh chan<- tea.Msg) {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	for name, st := range pool.specialists {
-		name, st := name, st
-		st.agent.OnEvent(func(ev claudia.Event) {
-			if ev.Type == "assistant" && ev.Text != "" {
-				msgCh <- tuiTokenMsg{name: name, text: ev.Text}
-			}
-			if ev.IsTerminalStop() {
-				msgCh <- tuiTurnDoneMsg{name: name}
-			}
-		})
-	}
-}
-
-// defaultGlossaryCachePath returns the default path for the glossary JSON
-// cache: ~/.pageflip/glossary.json. Falls back to "./glossary.json" if
-// the home directory cannot be determined.
 func defaultGlossaryCachePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

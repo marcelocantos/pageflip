@@ -1,52 +1,35 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
+use std::process::Command;
+
+use image::{ImageReader, RgbaImage};
 use xcap::{Monitor, Window};
 
 use super::{Capture, CaptureError, Frame, Region, WindowInfo, WindowSpec};
 
-pub struct MacOsCapture {
-    monitors: Vec<Monitor>,
-}
+pub struct MacOsCapture {}
 
 impl MacOsCapture {
     pub fn new() -> Result<Self, CaptureError> {
+        // Validate that at least one monitor is reachable at startup. Region
+        // capture itself uses /usr/sbin/screencapture (Apple's own CLI,
+        // backed by ScreenCaptureKit on modern macOS) rather than xcap's
+        // deprecated CGWindowListCreateImage path, which on macOS 14+
+        // returns stale cached frames when polled at sub-second intervals.
         let monitors = Monitor::all().map_err(|e| classify_xcap_error(e, "Monitor::all"))?;
         if monitors.is_empty() {
             return Err(CaptureError::BackendUnavailable(
                 "no monitors detected".to_string(),
             ));
         }
-        Ok(Self { monitors })
+        Ok(Self {})
     }
 }
 
 impl Capture for MacOsCapture {
     fn capture(&self, region: Region) -> Result<Frame, CaptureError> {
-        let monitor = find_monitor_for_region(&self.monitors, region)?;
-
-        let mon_x = monitor
-            .x()
-            .map_err(|e| classify_xcap_error(e, "Monitor::x"))?;
-        let mon_y = monitor
-            .y()
-            .map_err(|e| classify_xcap_error(e, "Monitor::y"))?;
-
-        // Translate absolute screen coordinates into monitor-local coordinates.
-        // find_monitor_for_region guarantees region.x >= mon_x and region.y >= mon_y,
-        // so the subtraction is non-negative and safe to cast to u32.
-        let local_x = (region.x - mon_x) as u32;
-        let local_y = (region.y - mon_y) as u32;
-
-        let image = monitor
-            .capture_region(local_x, local_y, region.w, region.h)
-            .map_err(|e| classify_xcap_error(e, "Monitor::capture_region"))?;
-
-        Ok(Frame {
-            width: image.width(),
-            height: image.height(),
-            rgba: image.into_raw(),
-        })
+        capture_via_screencapture(region)
     }
 
     fn list_windows(&self) -> Result<Vec<WindowInfo>, CaptureError> {
@@ -145,48 +128,55 @@ fn windows_to_infos(windows: Vec<Window>) -> Vec<super::WindowInfo> {
         .collect()
 }
 
-fn find_monitor_for_region(monitors: &[Monitor], region: Region) -> Result<&Monitor, CaptureError> {
-    let containing: Vec<&Monitor> = monitors
-        .iter()
-        .filter(|m| monitor_contains(m, region.x, region.y))
-        .collect();
+/// Capture a region by shelling out to `/usr/sbin/screencapture`. Apple's
+/// own CLI uses the modern, supported capture path (ScreenCaptureKit on
+/// recent macOS releases) and reliably returns a fresh frame on every
+/// invocation — unlike xcap's CGWindowListCreateImage path, which returns
+/// stale cached pixels under sub-second polling on macOS 14+.
+fn capture_via_screencapture(region: Region) -> Result<Frame, CaptureError> {
+    // -R x,y,w,h captures the rectangle in *global display* coordinates.
+    // -t png writes PNG. -x suppresses the shutter sound and screen flash.
+    // -o omits the window shadow (no-op for region capture but harmless).
+    let tmp = tempfile::Builder::new()
+        .prefix("pageflip-")
+        .suffix(".png")
+        .tempfile()
+        .map_err(|e| CaptureError::BackendFailed(format!("tempfile: {e}")))?;
 
-    if containing.is_empty() {
-        return Err(CaptureError::RegionOffScreen(region));
+    let rect = format!("{},{},{},{}", region.x, region.y, region.w, region.h);
+
+    let output = Command::new("/usr/sbin/screencapture")
+        .args(["-R", &rect, "-t", "png", "-x", "-o"])
+        .arg(tmp.path())
+        .output()
+        .map_err(|e| CaptureError::BackendFailed(format!("screencapture spawn: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lower = stderr.to_lowercase();
+        if lower.contains("not authorized")
+            || lower.contains("permission")
+            || lower.contains("screen recording")
+        {
+            return Err(CaptureError::PermissionDenied(stderr.into_owned()));
+        }
+        return Err(CaptureError::BackendFailed(format!(
+            "screencapture exited with {}: {}",
+            output.status, stderr
+        )));
     }
 
-    // Use the first monitor whose bounds fully contain the requested region.
-    // If none does, the region straddles a monitor boundary.
-    let fully_containing = containing
-        .iter()
-        .copied()
-        .find(|m| monitor_contains_rect(m, region.x, region.y, region.w as i32, region.h as i32));
+    let image: RgbaImage = ImageReader::open(tmp.path())
+        .map_err(|e| CaptureError::BackendFailed(format!("open captured png: {e}")))?
+        .decode()
+        .map_err(|e| CaptureError::BackendFailed(format!("decode captured png: {e}")))?
+        .to_rgba8();
 
-    fully_containing.ok_or(CaptureError::RegionSpansMonitors(region))
-}
-
-fn monitor_contains(monitor: &Monitor, px: i32, py: i32) -> bool {
-    let Ok(mx) = monitor.x() else { return false };
-    let Ok(my) = monitor.y() else { return false };
-    let Ok(mw) = monitor.width() else {
-        return false;
-    };
-    let Ok(mh) = monitor.height() else {
-        return false;
-    };
-    px >= mx && py >= my && px < mx + mw as i32 && py < my + mh as i32
-}
-
-fn monitor_contains_rect(monitor: &Monitor, x: i32, y: i32, w: i32, h: i32) -> bool {
-    let Ok(mx) = monitor.x() else { return false };
-    let Ok(my) = monitor.y() else { return false };
-    let Ok(mw) = monitor.width() else {
-        return false;
-    };
-    let Ok(mh) = monitor.height() else {
-        return false;
-    };
-    x >= mx && y >= my && x + w <= mx + mw as i32 && y + h <= my + mh as i32
+    Ok(Frame {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    })
 }
 
 /// Translate an xcap error into a CaptureError, preserving permission-denial

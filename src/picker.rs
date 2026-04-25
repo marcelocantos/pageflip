@@ -7,13 +7,36 @@ use std::rc::Rc;
 
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalPosition;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{CursorIcon, Fullscreen, Window, WindowId, WindowLevel};
+use winit::monitor::MonitorHandle;
+use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
 
 use crate::capture::{CropSpec, Frame, Region};
+
+/// Capture the target monitor's current desktop as softbuffer-ready XRGB
+/// pixels. Returns (xrgb_buffer, width, height) in physical pixels.
+fn snapshot_monitor(monitor: &MonitorHandle) -> Option<(Vec<u32>, u32, u32)> {
+    let backend = crate::capture::default_backend().ok()?;
+    let p = monitor.position();
+    let s = monitor.size();
+    let scale = monitor.scale_factor();
+    let region = Region {
+        x: (p.x as f64 / scale).round() as i32,
+        y: (p.y as f64 / scale).round() as i32,
+        w: (s.width as f64 / scale).round() as u32,
+        h: (s.height as f64 / scale).round() as u32,
+    };
+    let frame = backend.capture(region).ok()?;
+    let xrgb: Vec<u32> = frame
+        .rgba
+        .chunks_exact(4)
+        .map(|p| ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32))
+        .collect();
+    Some((xrgb, frame.width, frame.height))
+}
 
 #[derive(Debug)]
 pub enum PickerError {
@@ -34,9 +57,12 @@ impl fmt::Display for PickerError {
 
 impl std::error::Error for PickerError {}
 
-/// Open a fullscreen overlay on the primary monitor and return the region the
-/// user draws (in logical points, absolute screen coordinates), or `Ok(None)`
-/// if the user pressed Escape / closed the window.
+/// Open a borderless always-on-top overlay on every monitor and return
+/// the region the user drags (in logical points, absolute virtual-desktop
+/// coordinates), or `Ok(None)` if the user pressed Escape / closed the
+/// picker. Whichever monitor the user's mouse is on at click time is
+/// the one whose drag is captured; moving the mouse between monitors
+/// before clicking simply changes which overlay receives the event.
 pub fn pick_region() -> Result<Option<Region>, PickerError> {
     let event_loop = EventLoop::new().map_err(|e| PickerError::EventLoop(e.to_string()))?;
     let mut app = PickerApp::default();
@@ -49,83 +75,152 @@ pub fn pick_region() -> Result<Option<Region>, PickerError> {
     Ok(app.result)
 }
 
-#[derive(Default)]
-struct PickerApp {
-    window: Option<Rc<Window>>,
-    surface: Option<Surface<Rc<Window>, Rc<Window>>>,
+/// One per-monitor overlay in the multi-monitor picker. Each window
+/// holds its own pointer state and snapshot so a drag is always
+/// expressed in that monitor's coordinate space.
+struct PickerWindow {
+    window: Rc<Window>,
+    surface: Surface<Rc<Window>, Rc<Window>>,
     monitor_origin: (i32, i32),
     scale_factor: f64,
     pointer_px: Option<PhysicalPosition<f64>>,
     start_px: Option<PhysicalPosition<f64>>,
+    snapshot_xrgb: Option<Vec<u32>>,
+    snap_w: u32,
+    snap_h: u32,
+}
+
+#[derive(Default)]
+struct PickerApp {
+    windows: Vec<PickerWindow>,
     result: Option<Region>,
     error: Option<PickerError>,
 }
 
-impl ApplicationHandler for PickerApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let monitor = match event_loop.primary_monitor() {
-            Some(m) => m,
-            None => {
-                self.error = Some(PickerError::NoMonitor);
-                event_loop.exit();
-                return;
-            }
-        };
-        let origin = monitor.position();
-        self.monitor_origin = (origin.x, origin.y);
-
-        let attrs = Window::default_attributes()
-            .with_title("pageflip region picker")
-            .with_transparent(true)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_fullscreen(Some(Fullscreen::Borderless(Some(monitor))));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Rc::new(w),
-            Err(e) => {
-                self.error = Some(PickerError::Surface(e.to_string()));
-                event_loop.exit();
-                return;
-            }
-        };
-        window.set_cursor(CursorIcon::Crosshair);
-
-        self.scale_factor = window.scale_factor();
-        let size = window.inner_size();
-
-        let context = match Context::new(window.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                self.error = Some(PickerError::Surface(e.to_string()));
-                event_loop.exit();
-                return;
-            }
-        };
-        let mut surface = match Surface::new(&context, window.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                self.error = Some(PickerError::Surface(e.to_string()));
-                event_loop.exit();
-                return;
-            }
-        };
-        if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
-            if let Err(e) = surface.resize(w, h) {
-                self.error = Some(PickerError::Surface(e.to_string()));
-                event_loop.exit();
-                return;
-            }
-        }
-
-        self.window = Some(window);
-        self.surface = Some(surface);
+impl PickerApp {
+    /// Locate the index of the PickerWindow with the given winit WindowId.
+    /// Returns None if the event is for a window we no longer track (rare —
+    /// usually means the close-and-exit path is mid-flight).
+    fn find(&self, id: WindowId) -> Option<usize> {
+        self.windows.iter().position(|w| w.window.id() == id)
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    /// Tear down every per-monitor overlay and ask the event loop to exit.
+    /// Hide first so the user sees an immediate disappearance — `exit()`
+    /// alone leaves the NSWindows on screen until the run loop drains.
+    fn close_and_exit(&mut self, event_loop: &ActiveEventLoop) {
+        for pw in &self.windows {
+            pw.window.set_visible(false);
+        }
+        self.windows.clear();
+        event_loop.exit();
+    }
+}
+
+impl ApplicationHandler for PickerApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Open one overlay per monitor so the user can click+drag on
+        // whichever screen their mouse happens to be on, with no need to
+        // pre-position. Failure to enumerate monitors is fatal — the
+        // single-monitor primary fallback no longer applies because we
+        // want every screen covered.
+        let monitors: Vec<MonitorHandle> = event_loop.available_monitors().collect();
+        if monitors.is_empty() {
+            self.error = Some(PickerError::NoMonitor);
+            event_loop.exit();
+            return;
+        }
+
+        for monitor in monitors {
+            let origin = monitor.position();
+            let scale = monitor.scale_factor();
+            // Convert the monitor's physical origin to logical points so
+            // compute_region can add it to logical-point cursor positions
+            // without mixing units. On multi-monitor setups the physical
+            // origin is nonzero and needs scaling by the monitor's
+            // scale_factor.
+            let monitor_origin = (
+                (origin.x as f64 / scale).round() as i32,
+                (origin.y as f64 / scale).round() as i32,
+            );
+
+            let (snapshot_xrgb, snap_w, snap_h) = match snapshot_monitor(&monitor) {
+                Some((xrgb, w, h)) => (Some(xrgb), w, h),
+                None => (None, 0, 0),
+            };
+
+            // Borderless always-on-top window sized to the monitor's
+            // bounds — NOT fullscreen. On macOS, Fullscreen::Borderless
+            // creates a dedicated Mission Control Space which steals
+            // focus and leaves a ghost Space behind on exit.
+            let mon_pos = monitor.position();
+            let mon_size = monitor.size();
+            let attrs = Window::default_attributes()
+                .with_title("pageflip region picker")
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_window_level(WindowLevel::AlwaysOnTop)
+                .with_position(PhysicalPosition::new(mon_pos.x, mon_pos.y))
+                .with_inner_size(PhysicalSize::new(mon_size.width, mon_size.height));
+            let window = match event_loop.create_window(attrs) {
+                Ok(w) => Rc::new(w),
+                Err(e) => {
+                    self.error = Some(PickerError::Surface(e.to_string()));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            window.set_cursor(CursorIcon::Crosshair);
+
+            let scale_factor = window.scale_factor();
+            let size = window.inner_size();
+
+            let context = match Context::new(window.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.error = Some(PickerError::Surface(e.to_string()));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            let mut surface = match Surface::new(&context, window.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.error = Some(PickerError::Surface(e.to_string()));
+                    event_loop.exit();
+                    return;
+                }
+            };
+            if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+            {
+                if let Err(e) = surface.resize(w, h) {
+                    self.error = Some(PickerError::Surface(e.to_string()));
+                    event_loop.exit();
+                    return;
+                }
+            }
+
+            self.windows.push(PickerWindow {
+                window,
+                surface,
+                monitor_origin,
+                scale_factor,
+                pointer_px: None,
+                start_px: None,
+                snapshot_xrgb,
+                snap_w,
+                snap_h,
+            });
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(idx) = self.find(id) else {
+            return;
+        };
         match event {
             WindowEvent::CloseRequested => {
-                event_loop.exit();
+                self.close_and_exit(event_loop);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -137,14 +232,12 @@ impl ApplicationHandler for PickerApp {
                 ..
             } => {
                 self.result = None;
-                event_loop.exit();
+                self.close_and_exit(event_loop);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer_px = Some(position);
-                if self.start_px.is_some() {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                self.windows[idx].pointer_px = Some(position);
+                if self.windows[idx].start_px.is_some() {
+                    self.windows[idx].window.request_redraw();
                 }
             }
             WindowEvent::MouseInput {
@@ -153,39 +246,41 @@ impl ApplicationHandler for PickerApp {
                 ..
             } => match state {
                 ElementState::Pressed => {
-                    self.start_px = self.pointer_px;
+                    self.windows[idx].start_px = self.windows[idx].pointer_px;
                 }
                 ElementState::Released => {
-                    if let (Some(a), Some(b)) = (self.start_px, self.pointer_px) {
-                        if let Some(region) = self.region_from_drag(a, b) {
+                    if let (Some(a), Some(b)) =
+                        (self.windows[idx].start_px, self.windows[idx].pointer_px)
+                    {
+                        let pw = &self.windows[idx];
+                        if let Some(region) = compute_region(
+                            (a.x, a.y),
+                            (b.x, b.y),
+                            pw.scale_factor,
+                            pw.monitor_origin,
+                        ) {
                             self.result = Some(region);
-                            event_loop.exit();
+                            self.close_and_exit(event_loop);
                             return;
                         }
                     }
-                    self.start_px = None;
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                    self.windows[idx].start_px = None;
+                    self.windows[idx].window.request_redraw();
                 }
             },
             WindowEvent::RedrawRequested => {
-                self.render();
+                self.render(idx);
             }
             WindowEvent::Resized(size) => {
-                if let Some(surface) = &mut self.surface {
-                    if let (Some(w), Some(h)) =
-                        (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-                    {
-                        let _ = surface.resize(w, h);
-                    }
+                if let (Some(w), Some(h)) =
+                    (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                {
+                    let _ = self.windows[idx].surface.resize(w, h);
                 }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.windows[idx].window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.scale_factor = scale_factor;
+                self.windows[idx].scale_factor = scale_factor;
             }
             _ => {}
         }
@@ -193,51 +288,66 @@ impl ApplicationHandler for PickerApp {
 }
 
 impl PickerApp {
-    /// Translate two pointer positions (window-physical pixels) into a
-    /// `Region` in logical points, absolute to the virtual desktop, clamped
-    /// to a positive-area rectangle.
-    fn region_from_drag(
-        &self,
-        a: PhysicalPosition<f64>,
-        b: PhysicalPosition<f64>,
-    ) -> Option<Region> {
-        compute_region(
-            (a.x, a.y),
-            (b.x, b.y),
-            self.scale_factor,
-            self.monitor_origin,
-        )
-    }
-
-    fn render(&mut self) {
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        let Some(surface) = self.surface.as_mut() else {
-            return;
-        };
-        let size = window.inner_size();
+    fn render(&mut self, idx: usize) {
+        let pw = &mut self.windows[idx];
+        let size = pw.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
         }
 
-        let Ok(mut buffer) = surface.buffer_mut() else {
+        let Ok(mut buffer) = pw.surface.buffer_mut() else {
             return;
         };
 
-        // Clear: softbuffer presents 0x00RRGGBB into a transparent window. A
-        // value of 0 is "no contribution", so the rest of the overlay reveals
-        // the screen beneath. The rubber-band rectangle itself is drawn with
-        // bright opaque pixels so it's visible against any background.
-        for px in buffer.iter_mut() {
-            *px = 0;
+        let win_w = size.width as usize;
+        let win_h = size.height as usize;
+
+        // Background: blit the frozen desktop snapshot if we have one, dimmed
+        // by 50% so the selection rectangle stands out and the user perceives
+        // the picker as an overlay rather than their live desktop. Falls back
+        // to solid near-black if the snapshot capture failed.
+        if let Some(snap) = &pw.snapshot_xrgb {
+            let snap_w = pw.snap_w as usize;
+            let snap_h = pw.snap_h as usize;
+            for y in 0..win_h {
+                for x in 0..win_w {
+                    let sx = x.min(snap_w.saturating_sub(1));
+                    let sy = y.min(snap_h.saturating_sub(1));
+                    let src = snap[sy * snap_w + sx];
+                    let r = ((src >> 16) & 0xFF) / 2;
+                    let g = ((src >> 8) & 0xFF) / 2;
+                    let b = src & 0xFF;
+                    buffer[y * win_w + x] = (r << 16) | (g << 8) | (b / 2);
+                }
+            }
+        } else {
+            for px in buffer.iter_mut() {
+                *px = 0x101010;
+            }
         }
 
-        if let (Some(start_px), Some(cur_px)) = (self.start_px, self.pointer_px) {
+        if let (Some(start_px), Some(cur_px)) = (pw.start_px, pw.pointer_px) {
             let x0 = start_px.x.min(cur_px.x).round() as i32;
             let y0 = start_px.y.min(cur_px.y).round() as i32;
             let x1 = start_px.x.max(cur_px.x).round() as i32;
             let y1 = start_px.y.max(cur_px.y).round() as i32;
+
+            if let Some(snap) = &pw.snapshot_xrgb {
+                let snap_w = pw.snap_w as usize;
+                let snap_h = pw.snap_h as usize;
+                let lo_x = x0.clamp(0, win_w as i32) as usize;
+                let hi_x = x1.clamp(0, win_w as i32) as usize;
+                let lo_y = y0.clamp(0, win_h as i32) as usize;
+                let hi_y = y1.clamp(0, win_h as i32) as usize;
+                for y in lo_y..hi_y {
+                    for x in lo_x..hi_x {
+                        let sx = x.min(snap_w.saturating_sub(1));
+                        let sy = y.min(snap_h.saturating_sub(1));
+                        buffer[y * win_w + x] = snap[sy * snap_w + sx];
+                    }
+                }
+            }
+
             draw_rect_outline(
                 &mut buffer,
                 size.width as i32,
@@ -248,7 +358,7 @@ impl PickerApp {
             );
         }
 
-        window.pre_present_notify();
+        pw.window.pre_present_notify();
         let _ = buffer.present();
     }
 }

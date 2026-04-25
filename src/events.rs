@@ -32,6 +32,12 @@ pub struct SlideEvent {
     pub path: PathBuf,
     pub t_start_ms: u64,
     pub t_end_ms: u64,
+    /// Perceptual hash of the captured frame as lowercase hex. Enables
+    /// downstream revisit detection (e.g. meetcat suppressing specialist
+    /// re-analysis when a presenter navigates back to a previously-seen
+    /// slide) without re-decoding the PNG.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ocr: Option<Vec<OcrWord>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +115,7 @@ mod tests {
             path: PathBuf::from("/tmp/test/20260415T130050Z.png"),
             t_start_ms: 1_000,
             t_end_ms: 1_050,
+            phash: None,
             ocr: None,
             transcript_window: None,
             frontmost_app: None,

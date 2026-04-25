@@ -105,13 +105,21 @@ struct Cli {
     #[arg(long)]
     crop: bool,
 
-    /// Capture interval in seconds.
-    #[arg(long, default_value_t = 2.0, value_name = "SECS")]
+    /// Capture interval in seconds. Default 1.0 — fast enough to catch
+    /// presenters flicking through a couple of slides per second
+    /// without breaking a sweat. Each tick costs ~150 ms on macOS
+    /// (screencapture subprocess), so the loop sits idle ~85% of the
+    /// time at the default.
+    #[arg(long, default_value_t = 1.0, value_name = "SECS")]
     interval: f64,
 
-    /// pHash Hamming-distance threshold; frames closer than this to the last saved frame are skipped.
-    #[arg(long, default_value_t = 10, value_name = "N")]
-    threshold: u32,
+    /// Mean per-channel RMS pixel-difference threshold. A new frame is saved
+    /// only when its mean per-channel difference from the last accepted frame
+    /// is at or above this value (on the 0–255 scale). 5.0 comfortably above
+    /// cursor drift and PNG compression noise (≪1) but well below the
+    /// distance to a meaningfully different slide (typically 20+).
+    #[arg(long, default_value_t = 5.0, value_name = "RMS")]
+    threshold: f64,
 
     /// Output directory for captured PNGs.
     #[arg(long, value_name = "DIR")]
@@ -314,16 +322,16 @@ fn run(cli: &Cli) -> Result<(), String> {
 
     match &target {
         Target::Region(r) => eprintln!(
-            "pageflip: capturing region {:?} every {:.3}s (threshold {} bits); Ctrl-C to stop",
+            "pageflip: capturing region {:?} every {:.3}s (threshold {} RMS); Ctrl-C to stop",
             r, cli.interval, cli.threshold
         ),
         Target::Window(spec) => eprintln!(
-            "pageflip: capturing window {:?} every {:.3}s (threshold {} bits); Ctrl-C to stop",
+            "pageflip: capturing window {:?} every {:.3}s (threshold {} RMS); Ctrl-C to stop",
             spec, cli.interval, cli.threshold
         ),
         Target::WindowCropped(spec, crop) => eprintln!(
             "pageflip: capturing window {:?} crop ({:.3},{:.3},{:.3},{:.3}) \
-             every {:.3}s (threshold {} bits); Ctrl-C to stop",
+             every {:.3}s (threshold {} RMS); Ctrl-C to stop",
             spec, crop.x, crop.y, crop.w, crop.h, cli.interval, cli.threshold
         ),
     };
@@ -334,6 +342,12 @@ fn run(cli: &Cli) -> Result<(), String> {
     loop {
         let tick_start = std::time::Instant::now();
 
+        // SaveResult carries the Hamming distance for a future side
+        // channel (e.g. piping per-tick health into meetcat's TUI
+        // status bar). Stderr per-tick logging was retired in favour of
+        // meetcat's bubbletea status bar — the operator wants one
+        // authoritative place to watch the pipeline, not interleaved
+        // stderr streams.
         match capture_once(
             backend.as_ref(),
             &target,
@@ -511,7 +525,7 @@ fn capture_once(
     output_dir: &Path,
     sink: Option<&mut EventSink>,
     slog: Option<&mut SessionLog>,
-    threshold: u32,
+    threshold: f64,
 ) -> Result<SaveResult, String> {
     let t_start_ms = unix_ms();
 
@@ -522,18 +536,18 @@ fn capture_once(
     }
     .map_err(|e| e.to_string())?;
 
-    if !dedup.should_save(&frame) {
+    let (save, dist) = dedup.classify_detail(&frame);
+    if !save {
         if let Some(sl) = slog {
-            // We don't have the dist here without peeking inside Dedup, so
-            // log threshold=threshold with dist=0 as a conservative stand-in.
             sl.log(LogEvent::SlideDeduped {
                 t_ms: t_start_ms,
-                dist: 0,
+                dist: dist.unwrap_or(0.0),
                 threshold,
             });
         }
         return Ok(SaveResult::Deduped);
     }
+    let _ = dist;
 
     let slug = timestamp_slug();
 
@@ -578,6 +592,7 @@ fn capture_once(
             path: absolute,
             t_start_ms,
             t_end_ms,
+            phash: None, // retired in favour of meetcat-side RMS over the saved PNG
             ocr: None,
             transcript_window: None,
             frontmost_app: None,
