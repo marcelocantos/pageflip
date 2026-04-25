@@ -20,19 +20,30 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/marcelocantos/claudia"
 )
 
 // Default system prompts (inline fallbacks when config files are absent).
 // These strings must exactly match the content in meetcat/prompts/*.md so
 // that adding the files has no observable behaviour change.
-const defaultSkepticPrompt = `You are a skeptical meeting analyst. For each slide, surface: assumptions that aren't stated, numbers that need sources, claims that contradict prior slides, and questions the presenter should be asked. Be concise — 3-5 bullets max.`
+const noPreambleRule = "\n\nOutput only your analysis of the slide. Never acknowledge your role, explain what you are about to do, ask for input, or emit any preamble, greeting, or sign-off. Your very first token in every response must be substantive analysis."
 
-const defaultConstructivePrompt = `You are a constructive meeting analyst. For each slide, suggest: additions that would strengthen the argument, connections to other initiatives the team should know about, and "yes-and" extensions. Be concise — 3-5 bullets max.`
+const defaultSkepticPrompt = `You are a skeptical meeting analyst. For each slide, surface: assumptions that aren't stated, numbers that need sources, claims that contradict prior slides, and questions the presenter should be asked. Be concise — 3-5 bullets max.` + noPreambleRule
 
-const defaultNeutralPrompt = `You are a neutral meeting analyst. For each slide, provide: links to relevant prior decisions, paste-able URLs to authoritative sources mentioned, and factual context the audience might lack. Be concise — 3-5 bullets max.`
+const defaultConstructivePrompt = `You are a constructive meeting analyst. For each slide, suggest: additions that would strengthen the argument, connections to other initiatives the team should know about, and "yes-and" extensions. Be concise — 3-5 bullets max.` + noPreambleRule
 
-const defaultDejargoniserPrompt = `You are an acronym and jargon tracker. For each slide, identify abbreviations and jargon. If you know the expansion, state it. If unknown, say "unknown — first seen on this slide". Accumulate a running glossary across slides.`
+const defaultNeutralPrompt = `You are a neutral meeting analyst. For each slide, provide: links to relevant prior decisions, paste-able URLs to authoritative sources mentioned, and factual context the audience might lack. Be concise — 3-5 bullets max.` + noPreambleRule
+
+const defaultDejargoniserPrompt = `You are an acronym and jargon tracker for a technically sophisticated audience of experienced software engineers, researchers, and founders. Assume everyone already knows mainstream tech vocabulary: general CS/software terms (repo, branch, PR, CI, API, SDK, ORM, CLI, GUI, OSS, MVP, PoC, stdlib, etc.), common infrastructure (Docker, Kubernetes, AWS/GCP/Azure, S3, SQL, Redis, Kafka, etc.), mainstream AI/ML (LLM, RAG, embedding, transformer, agent, agentic, prompt, token, fine-tune, RLHF, MoE, diffusion, etc.), and well-known products (GitHub, VS Code, ChatGPT, Claude, Copilot, etc.). Do NOT define these. Do NOT define plain English words that happen to appear as nouns.
+
+Flag a term only when it is genuinely non-obvious to this audience: a company-internal code name, a domain-specific acronym from a niche field (biotech, law, finance microstructure, telco, etc.), a narrow research term unlikely to be recognised outside a specialist subfield, or an unusual coinage whose meaning would not be guessable. When in doubt, stay silent — a false miss is cheaper than noise.
+
+For each qualifying term, emit one line: ` + "`TERM — expansion/definition (source or \"unknown — first seen on this slide\")`" + `. Accumulate a running glossary across slides; never re-emit a term already defined earlier in this session.
+
+If a slide contains no qualifying terms, respond with absolutely nothing. Silence is the correct output for most slides.
+
+Never acknowledge your role, explain what you are about to do, ask for input, or emit any preamble, greeting, or sign-off. Your very first token in every response must be either a glossary entry or nothing at all.`
 
 const defaultContradictionsPrompt = `You are a contradiction detector for meeting presentations. Your role is to identify factual conflicts across slides within this meeting and against prior meetings indexed in mnemo.
 
@@ -49,7 +60,9 @@ When a contradiction is found, emit exactly this format:
 ⚠ CONTRADICTION: [current claim] vs [prior claim from meeting X on date Y]
 Source: [artifact path or mnemo reference]
 
-When no contradiction is found for a slide, respond with a single line: ✓ No contradictions detected.
+When no contradiction is found for a slide, respond with absolutely nothing — not even an acknowledgement line. Silence is the signal that nothing is wrong. Only emit output when a real contradiction is found.
+
+Never acknowledge your role, explain what you are about to do, ask for input, or emit any preamble, greeting, or sign-off. Your very first token in every response must be either the ⚠ CONTRADICTION line or nothing at all.
 
 Calibration: aim for precision over recall. A long meeting might surface 1–3 genuine contradictions. Do not flag rephrasing, rounding, or estimates-vs-actuals unless the difference is material. Do not flag the same contradiction twice.`
 
@@ -168,10 +181,19 @@ func MeetingSessionID() string {
 	return fmt.Sprintf("meetcat-%d", time.Now().UnixMilli())
 }
 
-// specialistSessionID derives a per-specialist session ID from the
-// meeting ID. Format: meetcat-<unix-ms>-<specialist-name>.
+// meetcatNamespace is a stable UUID v4 used as the DNS-ish namespace
+// for deriving deterministic per-specialist session IDs from the
+// human-readable meeting ID + specialist name. Regenerating this
+// value would invalidate every existing session ID, so don't.
+var meetcatNamespace = uuid.MustParse("7e4c8f50-4a3e-4d9a-8c1b-1e6b5f2a9d00")
+
+// specialistSessionID derives a deterministic UUID per
+// (meetingID, specialist) pair so Claude Code's --session-id
+// validation is satisfied and the same inputs always yield the
+// same session (necessary for `meetcat attach` to find the right
+// tmux window after a restart).
 func specialistSessionID(meetingID, name string) string {
-	return fmt.Sprintf("%s-%s", meetingID, name)
+	return uuid.NewSHA1(meetcatNamespace, fmt.Appendf(nil, "%s|%s", meetingID, name)).String()
 }
 
 // NewSessionPool creates a pool but does not start any agents yet.
@@ -190,35 +212,61 @@ func NewSessionPool(meetingID, workDir string, stderr io.Writer, logger *Logger,
 	}
 }
 
-// StartAll spawns all specialist agents (filtered by allowedNames) in
-// parallel. Returns when all have either started or failed. Errors from
-// individual agents are printed to stderr but do not abort others.
+// StartAll spawns all specialist agents (filtered by allowedNames)
+// concurrently, but serialises their auth/ready phase through a
+// 1-slot semaphore. Parallel startup saturates Claude Code's local
+// state (auth, config reads, renderer boot) and pushes per-agent
+// WaitReady past its 30s budget; gating that one phase keeps
+// readiness fast while letting Send + streaming responses run in
+// parallel afterwards. Errors on one specialist do not abort the
+// others.
 func (p *SessionPool) StartAll(ctx context.Context) {
 	specs := filterSpecialists(allSpecialists(), p.allowedNames)
+	authSem := make(chan struct{}, 1)
 	var wg sync.WaitGroup
 	for _, spec := range specs {
-		spec := spec
 		wg.Add(1)
-		go func() {
+		go func(s specialistDef) {
 			defer wg.Done()
-			p.startSpecialist(ctx, spec)
-		}()
+			p.startSpecialist(ctx, s, authSem)
+		}(spec)
 	}
 	wg.Wait()
 }
 
 // startSpecialist spawns one specialist agent and wires up its event
 // stream to stderr.
-func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef) {
+func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, authSem chan struct{}) {
+	// Serialise the auth/ready phase. Only one specialist is booting
+	// claude at a time; everything after WaitReady runs concurrently.
+	select {
+	case authSem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			<-authSem
+		}
+	}
+	defer release()
+
 	sessID := specialistSessionID(p.meetingID, spec.name)
 
 	agent, err := claudia.Start(claudia.Config{
 		WorkDir:   p.workDir,
 		Model:     spec.model,
 		SessionID: sessID,
+		// Load the specialist prompt as a system prompt so the agent
+		// boots with its role already configured. Sending it as a
+		// user message produces a preamble ("I'm ready to…") that
+		// clutters the stream before any slide has arrived.
+		ExtraArgs: []string{"--append-system-prompt", spec.prompt},
 	})
 	if err != nil {
-		fmt.Fprintf(p.stderr, "[%s] start error: %v\n", spec.name, err)
+		fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), colorize(colorError, fmt.Sprintf("start error: %v", err)))
 		p.logger.LogSpecialistError(spec.name, "start_failed")
 		return
 	}
@@ -234,28 +282,27 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef) {
 	// 🎯T19.4: wrap bare URLs with OSC 8 hyperlinks in text mode output.
 	agent.OnEvent(func(ev claudia.Event) {
 		if ev.Type == "assistant" && ev.Text != "" {
-			fmt.Fprintf(p.stderr, "[%s] %s\n", spec.name, wrapURLs(ev.Text))
+			fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), wrapURLs(ev.Text))
 		}
 	})
 
 	p.logger.LogSpecialistStart(spec.name, spec.model, SessionIDHash(sessID))
-	fmt.Fprintf(p.stderr, "[%s] session started (%s)\n", spec.name, sessID)
 
-	// Send the system prompt as the first message.
-	if err := agent.Send(spec.prompt); err != nil {
-		fmt.Fprintf(p.stderr, "[%s] prompt send error: %v\n", spec.name, err)
-		p.logger.LogSpecialistError(spec.name, "prompt_send_failed")
+	// Wait for claude to finish booting. This is the contended phase
+	// — the semaphore ensures only one specialist is doing it at a time.
+	if err := agent.WaitReady(ctx); err != nil {
+		fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), colorize(colorError, fmt.Sprintf("auth/ready error: %v", err)))
+		p.logger.LogSpecialistError(spec.name, "ready_failed")
 		agent.Stop()
 		return
 	}
+	fmt.Fprintf(p.stderr, "%s %s\n", tag(spec.name), colorize(colorDim, "ready"))
 
-	// Wait for the initial response (the agent acknowledging its role).
-	if _, err := agent.WaitForResponse(ctx); err != nil {
-		fmt.Fprintf(p.stderr, "[%s] initial response error: %v\n", spec.name, err)
-		p.logger.LogSpecialistError(spec.name, "initial_response_failed")
-		agent.Stop()
-		return
-	}
+	// Release the semaphore so the next specialist can begin booting
+	// while this one registers and awaits slide events. The role is
+	// already loaded via --append-system-prompt, so there's no
+	// role-acknowledgement round-trip to perform here.
+	release()
 
 	p.mu.Lock()
 	p.specialists[spec.name] = st
@@ -308,13 +355,13 @@ func (p *SessionPool) sendToSpecialist(ctx context.Context, name string, st *spe
 	start := time.Now()
 
 	if err := st.agent.Send(msg); err != nil {
-		fmt.Fprintf(p.stderr, "[%s] send error: %v\n", name, err)
+		fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorError, fmt.Sprintf("send error: %v", err)))
 		p.logger.LogSpecialistError(name, "send_failed")
 		return
 	}
 
 	if _, err := st.agent.WaitForResponse(ctx); err != nil {
-		fmt.Fprintf(p.stderr, "[%s] response error: %v\n", name, err)
+		fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorError, fmt.Sprintf("response error: %v", err)))
 		p.logger.LogSpecialistError(name, "response_failed")
 		return
 	}
@@ -354,10 +401,10 @@ func (p *SessionPool) StopAll() {
 
 			if name == "neutral" {
 				// 🎯T15: keep the neutral session alive in tmux.
-				fmt.Fprintf(p.stderr, "[%s] kept alive (turns: %d)\n", name, turns)
+				fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorDim, fmt.Sprintf("kept alive (turns: %d)", turns)))
 			} else {
 				st.agent.Stop()
-				fmt.Fprintf(p.stderr, "[%s] stopped (turns: %d)\n", name, turns)
+				fmt.Fprintf(p.stderr, "%s %s\n", tag(name), colorize(colorDim, fmt.Sprintf("stopped (turns: %d)", turns)))
 			}
 		}()
 	}

@@ -452,6 +452,116 @@ targets:
     origin: manual
     discovered: 2026-04-15
     achieved: 2026-04-15
+  T23:
+    name: Slide event loop is decoupled from specialist response latency
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - meetcat reads and prints the next ◆ [N] line within ~1 capture interval of pageflip emitting it, regardless of how long the previous slide's specialists are still running
+    - pool.SendSlide returns without waiting for any agent.Send or WaitForResponse
+    - specialist responses still print in the order each specialist receives them (per-specialist serialisation preserved)
+    - StopAll cleanly drains in-flight queues without dropping the final responses
+    context: 'Today, meetcat''s runText loop calls pool.SendSlide which wg.Waits for every specialist to finish responding before reading the next slide event. With 5 specialists at 10–60 s each, slides 2..N pile up unread in the pageflip→meetcat pipe; the user sees only ◆ [1] for the entire duration of the first slide''s analysis. This is the root cause of the long-running "frames not arriving" symptom that several capture-side fixes failed to address. Fix: each specialistState owns a buffered channel and a worker goroutine that drains it, calling Send + WaitForResponse serially per specialist. SendSlide renders the message once, pushes to every channel, returns. StopAll closes channels. Channels unbounded for now (per design decision: people spend 1–2 min per slide in practice).'
+    origin: manual
+    discovered: 2026-04-25
+  T24:
+    name: macOS region capture reliably returns fresh frames on every tick
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - After advancing a presentation slide, pageflip's next capture tick sees the new pixels (dist > 0 in stderr diagnostics, OR ◆ [N] event emitted)
+    - Capture latency stays within the configured interval (default 1 s) on a typical M-series Mac
+    - 'No regression on multi-monitor setups: capture still finds the right monitor for the chosen region'
+    context: 'xcap 0.9.4 uses the deprecated CGWindowListCreateImage API on macOS, which returns stale cached pixels under sub-second polling on macOS 14+ (and apparently macOS 26). Symptom: presenter advances slide, pageflip continues to see dist=0 from the first frame for many seconds. Just shipped a workaround that shells out to /usr/sbin/screencapture (Apple''s own CLI, backed by ScreenCaptureKit). Need to verify it actually unsticks capture in real meetings, and decide whether to also vendor a direct screencapturekit-rs path to avoid the per-tick subprocess (~150 ms).'
+    origin: manual
+    discovered: 2026-04-25
+  T25:
+    name: Frames showing a participant's face (webcam takeover) are suppressed before they reach analysis
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - Frames where a face occupies more than the configured area fraction are dropped before reaching the front-end loader
+    - TUI/stderr shows a single dim line when a frame is suppressed, with the area fraction so the threshold can be tuned by inspection
+    - Slides containing small face icons or photos (e.g. team headshots) are NOT suppressed
+    - Detection adds <50 ms per frame on M-series hardware
+    context: 'At the end of slide decks, presenters often stop screen-sharing and the captured region fills with someone''s face. We don''t want those frames to be OCR''d, sent to the loader, or analysed by specialists — they''re noise. Use objc2-vision (already a dep) to run VNDetectFaceRectanglesRequest on each accepted frame; if the largest detected face exceeds ~15% of the frame area (or smaller threshold to be tuned), drop the frame at the pre-processor stage and log a dim "\u21b7 frame suppressed (face fills N%)" line. The face-area heuristic is preferred over face count: a small face-shaped logo on a slide must not be enough to suppress.'
+    depends_on:
+    - T23
+    - T24
+    origin: manual
+    discovered: 2026-04-25
+  T26:
+    name: Each slide event carries OCR text and word bboxes from Apple Vision
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - SlideEvent NDJSON includes an `ocr` object with `full_text` and a `words` array of {text, bbox}
+    - bbox is normalised to 0–1 in the slide's own coordinate space
+    - OCR runs only on frames that pass dedup AND face-gating (no wasted work)
+    - Loader's prompt receives the OCR text alongside the screenshot path
+    context: 'Specialists currently get a path and a phash; they have to guess at slide content from the filename and frontmost app. The mental model has a CV/OCR stage between capture and the front-end loader: pageflip enriches each accepted (non-face-gated) frame with VNRecognizeTextRequest output (full_text + per-word [text, bbox]) and emits it as part of the SlideEvent NDJSON. Loader and specialists then have grounded text to reason over. Apple Vision (objc2-vision crate, already pulled in for face blur) is the right primitive — fast, no network, no model download.'
+    depends_on:
+    - T23
+    - T24
+    origin: manual
+    discovered: 2026-04-25
+  T27:
+    name: A long-running front-end loader agent emits a canonical semantic bundle for each slide
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - A new claudia session named `loader` boots alongside the specialists and persists across slides
+    - For every accepted slide event, the loader produces a JSON bundle with the documented schema (slide_label, label_source, title, subtitle, content_summary, etc.)
+    - 'label_source is one of: "page_number", "title", "sequential"'
+    - Specialists receive the bundle as their input message (not the raw event)
+    - The screenshot is referenced by file path in the prompt, not base64
+    context: 'Between the OCR-enriched event and the specialists, a new claudia session ("loader") receives the screenshot path + OCR + accumulated prior-slide context, and returns a structured bundle: slide_label (page number if visible, else short title-derived phrase, else sequential #N) + label_source, title, subtitle, speaker, content_summary, bullets[], figures[], raw_text. The loader is long-running so its session memory accumulates context across the meeting (helping it pick stable labels and detect "this is a follow-on from the last slide"). Specialists consume the bundle, NOT the raw event. The bundle''s slide_label becomes the grouping key for output.'
+    depends_on:
+    - T26
+    origin: manual
+    discovered: 2026-04-25
+  T28:
+    name: Specialist output lines are prefixed with the slide_label so a downstream consumer can re-group
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - Every specialist output line begins with `[role | slide_label]`
+    - 'Crash and timeout lines use the same prefix and explicitly name the failure mode (`crashed: …`, `timed-out after Ns`)'
+    - '`↺` revisit lines and `↷` face-suppressed lines also carry slide_label or a short reason, so the prefix is uniform across event types'
+    - Existing log output (LogSpecialistTurn, etc.) is unchanged; this is a stderr/UX concern only
+    context: 'Phase-1 output mode is pipe-friendly: each specialist''s line streams as soon as it arrives. To make that consumable downstream, prefix every line with `[role | slide_label]` instead of just `[role]`. Errors inline: `[skeptic | Slide 2 of 24] (crashed: ...)` or `(timed-out after 60s)`. End-of-meeting summary unchanged.'
+    depends_on:
+    - T27
+    origin: manual
+    discovered: 2026-04-25
+  T29:
+    name: TTY mode buffers per slide and prints the whole group atomically when the last specialist responds (phase 2)
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - When stdout is a TTY, each slide's output appears as a single grouped block (header line + one section per specialist)
+    - Slow specialists do not delay the printing of *earlier* slides' groups (each slide's group prints when its own specialists complete)
+    - Crashes and timeouts appear inside the group with a clear marker
+    - When stdout is not a TTY, behaviour is identical to 🎯T28 streaming output (no grouping, no buffering)
+    context: Phase 2 of the output split. When stdout is a TTY, hold each slide's specialist responses in memory and print the entire grouped block once the slowest specialist for that slide finishes (or times out). Pipe / non-TTY mode keeps the streaming `[role | label]` format from \ud83c\udfafT28. Likely needs a TUI framework again (Bubble Tea was retired in favour of plain text; this re-introduces it for grouped rendering only). Crashes/timeouts surface inside the group, not as a separate stream. Deferred until phase-1 plumbing is solid.
+    depends_on:
+    - T28
+    origin: manual
+    discovered: 2026-04-25
   T3:
     name: pageflip can target a specific window and keep capturing it when backgrounded (macOS)
     status: achieved

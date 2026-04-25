@@ -22,10 +22,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/marcelocantos/claudia"
 )
 
 const version = "0.0.1"
@@ -96,6 +92,7 @@ type slideEvent struct {
 	Path             string          `json:"path"`
 	TStartMs         uint64          `json:"t_start_ms"`
 	TEndMs           uint64          `json:"t_end_ms"`
+	PHash            string          `json:"phash,omitempty"`
 	OCR              json.RawMessage `json:"ocr,omitempty"`
 	TranscriptWindow json.RawMessage `json:"transcript_window,omitempty"`
 	FrontmostApp     string          `json:"frontmost_app,omitempty"`
@@ -242,19 +239,6 @@ func main() {
 	}
 }
 
-// isTTY reports whether f is connected to an interactive terminal.
-func isTTY(f *os.File) bool {
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	if fi.Mode()&os.ModeCharDevice == 0 {
-		return false
-	}
-	_, ok := fi.Sys().(*syscall.Stat_t)
-	return ok
-}
-
 // run processes the slide-event stream from in, writing a summary to
 // summary. pool, if non-nil, receives each validated slide event for
 // specialist analysis. logger may be nil (no-op).
@@ -262,15 +246,9 @@ func isTTY(f *os.File) bool {
 // When in is a TTY and pool is non-nil, run launches the bubbletea TUI.
 // Otherwise it falls back to line-by-line stderr mode for CI / pipe use.
 func run(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
-	useTUI := false
-	if pool != nil {
-		if f, ok := in.(*os.File); ok {
-			useTUI = isTTY(f)
-		}
-	}
-	if useTUI {
-		return runTUI(ctx, in, summary, logger, pool)
-	}
+	// Single-stream text mode with colour-coded tags. The bubbletea TUI has
+	// been retired — a chronologically-ordered scrollable stream is easier
+	// to copy-paste, grep, and tee, and it doesn't take over the terminal.
 	return runText(ctx, in, summary, logger, pool)
 }
 
@@ -280,17 +258,28 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
-	firstEvent := true
+	// Threshold 5 mirrors pageflip's default inter-slide dedup distance:
+	// anything within 5 bits of a previously-seen pHash is treated as the
+	// same slide returning, not a new one.
+	revisits := newRevisitTracker(5)
+	phashWarned := false
 
 	if pool != nil {
+		// Start all specialist agents immediately, in parallel, in a
+		// goroutine — do not wait for the first slide. This gives users
+		// a visible stream of "[skeptic] session started" etc. lines as
+		// soon as meetcat launches, instead of a silent wait.
+		go pool.StartAll(ctx)
+
 		defer func() {
 			pool.StopAll()
 			writeSessionIDsIfPossible(pool, os.Stderr)
 			printNeutralAttachHint(pool, os.Stderr)
 			ts := pool.TurnSummary()
-			fmt.Fprintln(summary, "meetcat: specialist turn counts:")
+			fmt.Fprintf(summary, "%s specialist turn counts:\n",
+				colorize(colorSystem, "meetcat:"))
 			for name, n := range ts {
-				fmt.Fprintf(summary, "  %s: %d\n", name, n)
+				fmt.Fprintf(summary, "  %s %d\n", tag(name), n)
 			}
 		}()
 	}
@@ -300,7 +289,8 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 		switch err := dec.Decode(&ev); {
 		case errors.Is(err, io.EOF):
 			logger.LogMeetingEnd(count, 0)
-			fmt.Fprintf(summary, "meetcat: processed %d slide event(s)\n", count)
+			fmt.Fprintf(summary, "%s processed %d slide event(s)\n",
+				colorize(colorSystem, "meetcat:"), count)
 			return nil
 		case err != nil:
 			logger.LogRejected("decode_error")
@@ -317,134 +307,42 @@ func runText(ctx context.Context, in io.Reader, summary io.Writer, logger *Logge
 		logger.LogValidated(ev.SlideID)
 		count++
 
-		// On first slide, spawn agents (if pool configured).
-		if pool != nil && firstEvent {
-			firstEvent = false
-			pool.StartAll(ctx)
-		}
-
 		front := ev.FrontmostApp
 		if front == "" {
 			front = "-"
 		}
+		if ev.PHash == "" && !phashWarned {
+			fmt.Fprintf(summary, "%s slide event has empty phash — revisit detection disabled for unstamped events. Is pageflip up to date?\n",
+				colorize(colorSystem, "meetcat:"))
+			phashWarned = true
+		}
+		revisit, firstIdx := revisits.classify(ev.PHash)
+		if revisit {
+			fmt.Fprintf(
+				summary,
+				"%s [%d] %s (t=%dms, dur=%dms, app=%s) %s %s\n",
+				colorize(colorDim, "↺"),
+				count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
+				colorize(colorDim, fmt.Sprintf("← slide %d", firstIdx+1)),
+			)
+			continue
+		}
 		fmt.Fprintf(
 			summary,
-			"[%d] %s (t=%dms, dur=%dms, app=%s) %s\n",
+			"%s [%d] %s (t=%dms, dur=%dms, app=%s) %s\n",
+			colorize(colorSlide, "◆"),
 			count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
 		)
 
-		// Send slide to all specialist agents in parallel.
+		// Send slide to all specialist agents in parallel. If an agent
+		// hasn't finished starting yet, SendSlide queues internally or
+		// skips gracefully per its own contract.
 		if pool != nil {
 			pool.SendSlide(ctx, &ev)
 		}
 	}
 }
 
-// runTUI starts the bubbletea TUI. It feeds slide events and specialist
-// token events into the model and returns when the meeting ends or the
-// user presses q.
-func runTUI(ctx context.Context, in io.Reader, summary io.Writer, logger *Logger, pool *SessionPool) error {
-	specs := allSpecialists()
-	m := newTUIModel(pool.meetingID, specs)
-
-	// msgCh carries tea.Msg values from background goroutines into the
-	// bubbletea program. Closed by the slide-decoder goroutine on exit.
-	msgCh := make(chan tea.Msg, 256)
-
-	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(os.Stdin))
-
-	// Relay messages from msgCh into bubbletea.
-	go func() {
-		for msg := range msgCh {
-			prog.Send(msg)
-		}
-	}()
-
-	// Slide-decoder goroutine: reads NDJSON, validates, feeds TUI and pool.
-	go func() {
-		dec := json.NewDecoder(bufio.NewReader(in))
-		count := 0
-		firstEvent := true
-
-		defer func() {
-			logger.LogMeetingEnd(count, 0)
-			pool.StopAll()
-			writeSessionIDsIfPossible(pool, os.Stderr)
-			printNeutralAttachHint(pool, os.Stderr)
-			close(msgCh)
-			prog.Send(tuiStopMsg{})
-		}()
-
-		for {
-			var ev slideEvent
-			switch err := dec.Decode(&ev); {
-			case errors.Is(err, io.EOF):
-				return
-			case err != nil:
-				logger.LogRejected("decode_error")
-				return
-			}
-
-			logger.LogReceived(ev.SlideID, "")
-			if err := ev.validate(); err != nil {
-				logger.LogRejected("validation_failed")
-				return
-			}
-			logger.LogValidated(ev.SlideID)
-			count++
-
-			evCopy := ev
-			msgCh <- tuiSlideMsg{ev: &evCopy}
-
-			if firstEvent {
-				firstEvent = false
-				// Start agents and wire token hooks to feed the TUI.
-				// pool.StartAll installs stderr-based OnEvent handlers;
-				// we immediately replace them with TUI-forwarding handlers.
-				pool.StartAll(ctx)
-				wireTokenHooks(pool, msgCh)
-			}
-			pool.SendSlide(ctx, &evCopy)
-		}
-	}()
-
-	if _, err := prog.Run(); err != nil {
-		return fmt.Errorf("tui: %w", err)
-	}
-
-	// Print text summary after TUI exits.
-	ts := pool.TurnSummary()
-	fmt.Fprintln(summary, "meetcat: specialist turn counts:")
-	for name, n := range ts {
-		fmt.Fprintf(summary, "  %s: %d\n", name, n)
-	}
-	return nil
-}
-
-// wireTokenHooks replaces each specialist agent's OnEvent handler with
-// one that forwards token text and turn-done signals into msgCh. Must be
-// called after pool.StartAll — agents must exist before OnEvent is set.
-// OnEvent replaces the previous handler (one at a time), which is
-// intentional: the TUI channel supersedes the stderr fallback.
-func wireTokenHooks(pool *SessionPool, msgCh chan<- tea.Msg) {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	for name, st := range pool.specialists {
-		name, st := name, st
-		st.agent.OnEvent(func(ev claudia.Event) {
-			if ev.Type == "assistant" && ev.Text != "" {
-				msgCh <- tuiTokenMsg{name: name, text: ev.Text}
-			}
-			if ev.IsTerminalStop() {
-				msgCh <- tuiTurnDoneMsg{name: name}
-			}
-		})
-	}
-}
-
-// defaultGlossaryCachePath returns the default path for the glossary JSON
-// cache: ~/.pageflip/glossary.json. Falls back to "./glossary.json" if
-// the home directory cannot be determined.
 func defaultGlossaryCachePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

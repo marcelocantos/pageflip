@@ -522,18 +522,21 @@ fn capture_once(
     }
     .map_err(|e| e.to_string())?;
 
-    if !dedup.should_save(&frame) {
-        if let Some(sl) = slog {
-            // We don't have the dist here without peeking inside Dedup, so
-            // log threshold=threshold with dist=0 as a conservative stand-in.
-            sl.log(LogEvent::SlideDeduped {
-                t_ms: t_start_ms,
-                dist: 0,
-                threshold,
-            });
+    let (phash_opt, dist) = dedup.classify_detail(&frame);
+    let phash_hex = match phash_opt {
+        Some(h) => h,
+        None => {
+            if let Some(sl) = slog {
+                sl.log(LogEvent::SlideDeduped {
+                    t_ms: t_start_ms,
+                    dist: dist.unwrap_or(0),
+                    threshold,
+                });
+            }
+            return Ok(SaveResult::Deduped);
         }
-        return Ok(SaveResult::Deduped);
-    }
+    };
+    let _ = dist;
 
     let slug = timestamp_slug();
 
@@ -578,6 +581,7 @@ fn capture_once(
             path: absolute,
             t_start_ms,
             t_end_ms,
+            phash: Some(phash_hex.clone()),
             ocr: None,
             transcript_window: None,
             frontmost_app: None,

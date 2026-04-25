@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -117,11 +118,22 @@ func TestMeetingSessionIDUniqueAcrossTime(t *testing.T) {
 }
 
 func TestSpecialistSessionIDFormat(t *testing.T) {
+	// Claude Code's --session-id requires a UUID. Verify we produce one
+	// and that the derivation is deterministic per (meeting, specialist).
 	meetingID := "meetcat-1234567890"
 	id := specialistSessionID(meetingID, "skeptic")
-	want := "meetcat-1234567890-skeptic"
-	if id != want {
-		t.Errorf("got %q, want %q", id, want)
+	// UUID format: 8-4-4-4-12 hex groups separated by '-'.
+	uuidRE := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	if !uuidRE.MatchString(id) {
+		t.Errorf("got %q, expected UUID-formatted string", id)
+	}
+	// Determinism: same inputs must yield the same UUID.
+	if id2 := specialistSessionID(meetingID, "skeptic"); id != id2 {
+		t.Errorf("non-deterministic: %q vs %q", id, id2)
+	}
+	// Different specialists must yield different UUIDs.
+	if other := specialistSessionID(meetingID, "neutral"); other == id {
+		t.Errorf("collision: skeptic and neutral produced the same UUID %q", id)
 	}
 }
 

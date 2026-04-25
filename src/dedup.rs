@@ -38,23 +38,58 @@ impl Dedup {
     }
 
     /// Returns `true` if the frame should be saved, updating the stored
-    /// "last saved" hash on acceptance.
+    /// "last saved" hash on acceptance. Retained for unit tests and
+    /// callers that don't need the hash — production capture uses
+    /// [`classify`] for the hash-bearing variant.
+    #[cfg(test)]
     pub fn should_save(&mut self, frame: &Frame) -> bool {
+        self.classify(frame).is_some()
+    }
+
+    /// Classify a frame against the last accepted hash. Returns the
+    /// frame's perceptual-hash hex string if the frame is "new enough"
+    /// to be saved (and updates the stored hash), or `None` if the
+    /// frame is too close to the last saved one to be worth saving.
+    #[cfg(test)]
+    pub fn classify(&mut self, frame: &Frame) -> Option<String> {
+        self.classify_detail(frame).0
+    }
+
+    /// Same as [`classify`] but also returns the Hamming distance
+    /// from the last-accepted frame (None on the very first frame)
+    /// so callers can report it.
+    pub fn classify_detail(&mut self, frame: &Frame) -> (Option<String>, Option<u32>) {
         let buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
             ImageBuffer::from_raw(frame.width, frame.height, frame.rgba.clone())
                 .expect("Frame buffer always matches width*height*4");
         let image = DynamicImage::ImageRgba8(buf);
         let hash = self.hasher.hash_image(&image);
 
-        let save = match &self.last_hash {
-            None => true,
-            Some(prev) => prev.dist(&hash) >= self.threshold,
+        let (save, dist) = match &self.last_hash {
+            None => (true, None),
+            Some(prev) => {
+                let d = prev.dist(&hash);
+                (d >= self.threshold, Some(d))
+            }
         };
+        let hex = hash_to_hex(&hash);
         if save {
             self.last_hash = Some(hash);
+            (Some(hex), dist)
+        } else {
+            (None, dist)
         }
-        save
     }
+}
+
+/// Render an `ImageHash` as lowercase hex, so events carry a stable
+/// identifier that downstream consumers (e.g. meetcat's revisit
+/// detector) can use for exact-match or Hamming-distance comparison.
+fn hash_to_hex(h: &ImageHash) -> String {
+    h.as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 #[cfg(test)]
