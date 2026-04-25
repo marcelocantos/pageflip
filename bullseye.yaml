@@ -598,6 +598,21 @@ targets:
     context: 'During v1 web-UI testing the operator observed that the existing specialists are implicitly biased toward "you are the presenter reviewing your own deck for improvement". They issue critical findings — assumptions to check, missing baselines, claims to ground — which is high-value when you''re refining material you own. But the more common usage is the opposite: you''re in the audience of someone else''s meeting and you want to extract notes, questions, commitments, and jargon from what''s being shown to you, not critique the deck. Splitting into named modes lets the same agent infrastructure serve both contexts without one shape compromising the other. attendee is the default because it''s the higher-frequency case; the existing presenter mode stays available for solo deck-review sessions. Architecturally this is a natural extension of the existing specialist registry — modes are just named slices of specialists; the tougher part is authoring strong attendee-mode prompts that produce useful output without slipping into critical framing. Originator: 2026-04-25 web-UI testing session.'
     origin: discovered during web-UI testing session 2026-04-25
     discovered: 2026-04-25
+  T31:
+    name: When the captured region is showing video, dedup auto-suspends so the analysis pipeline isn't drowned in frames
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - When N consecutive captures all cross the dedup threshold (every frame is being saved), pageflip enters a 'video detected' mode that suspends specialist dispatch — slides aren't emitted to meetcat while the rolling-window detection is true.
+    - 'The video-detection signal is rolling: once consecutive frames again fall below threshold (i.e. the screen is static again), normal slide capture resumes.'
+    - Configurable via a flag (e.g. --video-window N, default 5–10) and an opt-out flag (--no-video-suspend) for users who want every captured frame.
+    - An stderr / system-line message is emitted on entering and leaving video mode so the operator understands why slides stopped flowing.
+    - 'Optional: also auto-pause the meetcat-side specialist pool while in video mode so token spend doesn''t spike. Or: pageflip just stops emitting events and meetcat is none the wiser.'
+    - Tests cover the rolling-window enter/exit transitions with synthetic frame sequences.
+    context: 'Once dedup is rebuilt on RMS pixel difference (🎯T31), a presenter who plays a video clip (or any continuously-changing content like a webcam feed embedded in a slide) will produce a stream of frames that all cross the threshold. Each one triggers full specialist analysis — five LLM round-trips per second — which is wasteful (most of those frames aren''t worth analysing on their own) and noisy (the operator''s web view fills with near-duplicate cards). Detection: a rolling window of the last N captures; if all are ''save'' decisions, treat it as video and suspend emission until the rate drops. This is one place where some heuristic on top of the simple RMS gate genuinely earns its keep. Originator: 2026-04-26 dedup redesign discussion (during pHash → RMS migration).'
+    origin: forked-from 🎯T31 (pHash → RMS dedup, 2026-04-26)
+    discovered: 2026-04-26
   T4:
     name: User can crop a sub-rectangle within a selected window and have it tracked as the window moves or resizes
     status: achieved

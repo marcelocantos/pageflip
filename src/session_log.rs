@@ -97,11 +97,14 @@ pub enum LogEvent {
         /// Stable within a session for correlation; opaque across sessions.
         path_hash: String,
     },
-    /// A frame was suppressed by the dedup gate.
+    /// A frame was suppressed by the dedup gate. `dist` is the mean
+    /// per-channel RMS difference (0–255 scale) between the new and
+    /// last-saved frames; `threshold` is the configured gate value
+    /// in the same units.
     SlideDeduped {
         t_ms: u64,
-        dist: u32,
-        threshold: u32,
+        dist: f64,
+        threshold: f64,
     },
     /// A batch of audio samples was dispatched to the transcriber.
     AudioBatch {

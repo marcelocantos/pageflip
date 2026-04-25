@@ -24,7 +24,6 @@ bytemuck = "1"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
-image_hasher = "3"
 notify = "7.0.0"
 regex = "1"
 screencapturekit = "1"

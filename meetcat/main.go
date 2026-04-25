@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -505,11 +506,12 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 	reader := bufio.NewReader(in)
 	dec := json.NewDecoder(reader)
 	count := 0
-	// Threshold 5 mirrors pageflip's default inter-slide dedup distance:
-	// anything within 5 bits of a previously-seen pHash is treated as the
-	// same slide returning, not a new one.
-	revisits := newRevisitTracker(5)
-	phashWarned := false
+	// Revisit detection by per-pixel RMS diff against every prior
+	// accepted slide. Threshold 5 means "mean per-channel difference
+	// ≤ 5 on the 0–255 scale" — comfortably above cursor drift and
+	// PNG compression noise (≤1) but well below the distance to a
+	// meaningfully different slide (typically 20+).
+	revisits := newRevisitTracker(5.0)
 
 	if pool != nil {
 		// Start all specialist agents immediately, in parallel, in a
@@ -560,20 +562,26 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 		if front == "" {
 			front = "-"
 		}
-		if ev.PHash == "" && !phashWarned {
-			sink.SystemLine(fmt.Sprintf("%s slide event has empty phash — revisit detection disabled for unstamped events. Is pageflip up to date?",
-				colorize(colorSystem, "meetcat:")))
-			phashWarned = true
+		revisit, firstIdx, dist, rerr := revisits.classify(ev.Path)
+		if rerr != nil {
+			sink.SystemLine(fmt.Sprintf("%s slide [%d] revisit-detect error: %v (treating as new)",
+				colorize(colorSystem, "meetcat:"), count, rerr))
 		}
-		revisit, firstIdx := revisits.classify(ev.PHash)
 		if revisit {
 			sink.SystemLine(fmt.Sprintf(
 				"%s [%d] %s (t=%dms, dur=%dms, app=%s) %s %s",
 				colorize(colorDim, "↺"),
 				count, ev.SlideID, ev.TStartMs, ev.TEndMs-ev.TStartMs, front, ev.Path,
-				colorize(colorDim, fmt.Sprintf("← slide %d", firstIdx+1)),
+				colorize(colorDim, fmt.Sprintf("← slide %d (rms=%.2f)", firstIdx+1, dist)),
 			))
 			continue
+		}
+		// Log the closest-prior-slide RMS for non-revisit slides too, so
+		// the operator can tune the threshold against real-meeting data.
+		// dist is NaN when there were no priors to compare against.
+		if !math.IsNaN(dist) {
+			sink.SystemLine(fmt.Sprintf("%s slide [%d] closest-prior-slide RMS: %.2f",
+				colorize(colorSystem, "meetcat:"), count, dist))
 		}
 		// OpenSection feeds both the web view (which uses imagePath
 		// to compute a clean /slides/* URL) and the stderr fallback
