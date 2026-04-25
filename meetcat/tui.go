@@ -150,9 +150,10 @@ type tuiTickMsg time.Time
 // defer block at EOF).
 type tuiQuitMsg struct{}
 
-// tuiTickInterval drives the age-timer refresh. 100 ms is fast enough
-// to feel live without burning a noticeable amount of CPU.
-const tuiTickInterval = 100 * time.Millisecond
+// tuiTickInterval drives the age-timer refresh. 1 second matches the
+// status-bar's whole-second resolution — finer ticks animated a sub-
+// second display that the operator just experienced as flicker.
+const tuiTickInterval = 1 * time.Second
 
 func tuiTickCmd() tea.Cmd {
 	return tea.Tick(tuiTickInterval, func(t time.Time) tea.Msg {
@@ -563,7 +564,7 @@ func (m tuiModel) View() string {
 	}
 	age := "—"
 	if !m.lastFrameAt.IsZero() {
-		age = fmt.Sprintf("%.1fs", time.Since(m.lastFrameAt).Seconds())
+		age = fmt.Sprintf("%ds", int(time.Since(m.lastFrameAt).Seconds()))
 	}
 	bar := fmt.Sprintf(
 		" frames: %d · last: %s · age: %s ·%s meeting: %s",
