@@ -1,7 +1,7 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
-// Package main — artifact writer for meetcat.
+// Package main — artifact writer for the pageflip orchestrator.
 //
 // This file implements 🎯T12: at meeting-stop the neutral specialist
 // agent is asked to emit structured meeting outputs, which are then

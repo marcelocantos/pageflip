@@ -1,7 +1,7 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
-// Package main — glossary cache for meetcat's dejargoniser.
+// Package main — glossary cache for pageflip's dejargoniser.
 //
 // Implements 🎯T16: a local Confluence glossary cache layer that feeds
 // known acronym expansions to the dejargoniser specialist agent.
@@ -239,7 +239,7 @@ func ResearchAcronym(ctx context.Context, acronym string, cache *GlossaryCache, 
 		acronym,
 	)
 
-	ch, err := task.RunTask(ctx, prompt)
+	ch, err := task.Run(ctx, prompt)
 	if err != nil {
 		return
 	}
@@ -318,7 +318,7 @@ func RefreshFromConfluence(ctx context.Context, confluenceURL string, cache *Glo
 		confluenceURL,
 	)
 
-	ch, err := task.RunTask(ctx, prompt)
+	ch, err := task.Run(ctx, prompt)
 	if err != nil {
 		return 0, fmt.Errorf("glossary: confluence task: %w", err)
 	}

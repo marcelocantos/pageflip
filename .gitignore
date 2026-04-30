@@ -11,11 +11,15 @@ Cargo.lock.bak
 # Claude Code agent worktrees
 .claude/
 
-# meetcat build artifact
-/meetcat/meetcat
+# pageflip (Go orchestrator) build artefact
+/meetcat/pageflip
 
-# pageflip output
+# pageflip-capture (Rust engine) per-run output directories
+pageflip-capture-*/
+
+# pageflip (Go orchestrator) per-meeting artefact directories
 pageflip-*/
 
-# meetcat artifact directories (one per meeting; never to be committed)
+# Legacy meetcat-* artefact directories (from before the rename — keep
+# ignored so old meetings don't get accidentally committed).
 meetcat-*/

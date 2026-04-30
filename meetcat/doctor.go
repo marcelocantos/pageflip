@@ -18,7 +18,7 @@ import (
 // logFile is the --log-file path; if empty the "Recent session log"
 // section notes that no log file was configured.
 func runDoctor(w io.Writer, logFile string) {
-	fmt.Fprintln(w, "# meetcat doctor")
+	fmt.Fprintln(w, "# pageflip doctor")
 	fmt.Fprintln(w)
 
 	writeVersions(w)
@@ -35,7 +35,7 @@ func runDoctor(w io.Writer, logFile string) {
 func writeVersions(w io.Writer) {
 	fmt.Fprintln(w, "## Versions")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "- **meetcat** %s (sha: %s)\n", version, gitSHA)
+	fmt.Fprintf(w, "- **pageflip** %s (sha: %s)\n", version, gitSHA)
 	fmt.Fprintf(w, "- **Go runtime** %s\n", runtime.Version())
 	fmt.Fprintln(w)
 }
@@ -89,11 +89,11 @@ func writeAuthState(w io.Writer) {
 func writeActiveSubprocesses(w io.Writer) {
 	fmt.Fprintln(w, "## Active subprocesses")
 	fmt.Fprintln(w)
-	// Active agents are only available while meetcat is running with
+	// Active agents are only available while pageflip is running with
 	// --agents. The doctor subcommand runs standalone, so it cannot
-	// enumerate live sessions here. Use `meetcat attach` to inspect
+	// enumerate live sessions here. Use `pageflip attach` to inspect
 	// a running specialist session.
-	fmt.Fprintln(w, "- (doctor cannot enumerate live agents; run `meetcat attach` while meetcat is active)")
+	fmt.Fprintln(w, "- (doctor cannot enumerate live agents; run `pageflip attach` while pageflip is active)")
 	fmt.Fprintln(w)
 }
 

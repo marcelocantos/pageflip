@@ -1,7 +1,7 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
-// Package main — claudia session-mode specialist agents for meetcat.
+// Package main — claudia session-mode specialist agents for pageflip.
 //
 // This file implements 🎯T19.2: spawning persistent claudia.Agent
 // sessions and streaming slide events into them.
@@ -208,8 +208,8 @@ type specialistState struct {
 	// 🎯T23: per-specialist work queue. SendSlide pushes one job per
 	// slide; runSpecialistWorker drains it serially, calling Send +
 	// WaitForResponse for each. This decouples the slide-event loop
-	// from per-specialist latency so meetcat keeps reading pageflip's
-	// NDJSON stream regardless of how long the previous slide is
+	// from per-specialist latency so pageflip's orchestrator keeps
+	// reading pageflip-capture's NDJSON stream regardless of how long the previous slide is
 	// still being analysed. Closed by StopAll to signal drain-and-
 	// exit; the worker's for-range terminates once the channel is
 	// empty.
@@ -325,24 +325,24 @@ type SessionPool struct {
 }
 
 // MeetingSessionID constructs a meeting-unique session ID from the
-// current time. Format: meetcat-<unix-ms>.
+// current time. Format: pageflip-<unix-ms>.
 func MeetingSessionID() string {
-	return fmt.Sprintf("meetcat-%d", time.Now().UnixMilli())
+	return fmt.Sprintf("pageflip-%d", time.Now().UnixMilli())
 }
 
-// meetcatNamespace is a stable UUID v4 used as the DNS-ish namespace
+// pageflipNamespace is a stable UUID v4 used as the DNS-ish namespace
 // for deriving deterministic per-specialist session IDs from the
 // human-readable meeting ID + specialist name. Regenerating this
 // value would invalidate every existing session ID, so don't.
-var meetcatNamespace = uuid.MustParse("7e4c8f50-4a3e-4d9a-8c1b-1e6b5f2a9d00")
+var pageflipNamespace = uuid.MustParse("7e4c8f50-4a3e-4d9a-8c1b-1e6b5f2a9d00")
 
 // specialistSessionID derives a deterministic UUID per
 // (meetingID, specialist) pair so Claude Code's --session-id
 // validation is satisfied and the same inputs always yield the
-// same session (necessary for `meetcat attach` to find the right
+// same session (necessary for `pageflip attach` to find the right
 // tmux window after a restart).
 func specialistSessionID(meetingID, name string) string {
-	return uuid.NewSHA1(meetcatNamespace, fmt.Appendf(nil, "%s|%s", meetingID, name)).String()
+	return uuid.NewSHA1(pageflipNamespace, fmt.Appendf(nil, "%s|%s", meetingID, name)).String()
 }
 
 // NewSessionPool creates a pool but does not start any agents yet.
@@ -582,7 +582,7 @@ func (p *SessionPool) SendSlide(ctx context.Context, ev *slideEvent) {
 
 // StopAll cleanly shuts down every specialist agent. The Claude Code
 // JSONL files persist regardless of whether the tmux window is torn
-// down, so resuming a meeting with `meetcat resume <meeting-id>`
+// down, so resuming a meeting with `pageflip resume <meeting-id>`
 // works for all five specialists with no need to keep tmux windows
 // hanging around per-meeting.
 //
