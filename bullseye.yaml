@@ -613,6 +613,21 @@ targets:
     context: 'Once dedup is rebuilt on RMS pixel difference (🎯T31), a presenter who plays a video clip (or any continuously-changing content like a webcam feed embedded in a slide) will produce a stream of frames that all cross the threshold. Each one triggers full specialist analysis — five LLM round-trips per second — which is wasteful (most of those frames aren''t worth analysing on their own) and noisy (the operator''s web view fills with near-duplicate cards). Detection: a rolling window of the last N captures; if all are ''save'' decisions, treat it as video and suspend emission until the rate drops. This is one place where some heuristic on top of the simple RMS gate genuinely earns its keep. Originator: 2026-04-26 dedup redesign discussion (during pHash → RMS migration).'
     origin: forked-from 🎯T31 (pHash → RMS dedup, 2026-04-26)
     discovered: 2026-04-26
+  T32:
+    name: meetcat ships through the Homebrew tap alongside pageflip and pageflip-feed
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - release.yml builds the meetcat Go binary on macos-14 (with the embedded web/ assets baked in via go:embed) and includes it in the darwin-arm64 release tarball.
+    - 'homebrew-releaser''s install line installs all three binaries: pageflip, pageflip-feed, meetcat.'
+    - homebrew-releaser's test line verifies `meetcat --version` in addition to `pageflip --version`.
+    - After `brew upgrade marcelocantos/tap/pageflip` against a fresh release, `which meetcat` resolves to /opt/homebrew/bin/meetcat (not ~/go/bin/meetcat) and `meetcat --version` reports the released tag.
+    - Linux x86_64 / linux-arm64 release tarballs are out of scope for now — meetcat is macOS-only because pageflip is, but if/when Linux pageflip lands, meetcat goes with it.
+    - The release workflow's bullseye gate continues to cover both Rust and Go test suites (`make bullseye` already runs the Go tests via the project Makefile).
+    context: 'Discovered during the v0.2.0 release: release.yml builds only the Rust binaries (pageflip, pageflip-feed) and the Homebrew formula''s install line installs only those. meetcat — now the primary user-facing product after the bubbletea TUI was replaced by the embedded web app — isn''t shipped at all through brew. Operators have to `go install ./meetcat/.` separately, which defeats the "single binary entry / brew install everything" promise the v0.2.0 release notes implicitly make. The Go binary is small (~20 MB), embeds web/ via go:embed so there are no runtime asset paths to worry about, and the macos-14 runner already has the Go toolchain available. The change is mechanical: add a `go build -ldflags ''-X main.gitSHA=...''` step in release.yml''s build job, include the meetcat binary in the tarball, update the homebrew-releaser `install` and `test` lines. Originator: 2026-04-26 v0.2.0 release post-mortem.'
+    origin: discovered during /release v0.2.0 post-mortem 2026-04-26
+    discovered: 2026-04-26
   T4:
     name: User can crop a sub-rectangle within a selected window and have it tracked as the window moves or resizes
     status: achieved
