@@ -408,8 +408,8 @@ func startWebServer(meetingID, workDir, webDir string, h *hub) (string, func(), 
 		})
 	})
 
-	// Slide PNG passthrough. pageflip writes images into a
-	// pageflip-<ts>/ directory under work_dir; we serve any PNG that
+	// Slide PNG passthrough. pageflip-capture writes images into a
+	// pageflip-capture-<ts>/ directory under work_dir; we serve any PNG that
 	// resolves under work_dir, with a path-traversal guard so a
 	// malicious URL can't escape the meeting's directory.
 	absWork, err := filepath.Abs(workDir)
@@ -463,20 +463,20 @@ func startWebServer(meetingID, workDir, webDir string, h *hub) (string, func(), 
 		}
 	})
 
-	// Fixed port so a `meetcat resume` instance binds the same URL
+	// Fixed port so a `pageflip resume` instance binds the same URL
 	// that the original tab is still pointed at. EventSource auto-
 	// reconnects on the same URL, so the open tab picks the new
 	// session up without the operator touching anything. Picked
 	// from the IANA dynamic range (49152-65535) to avoid the
 	// commonly-used dev-tool ports clustered in the 8xxx-9xxx
-	// neighbourhood. The trade-off — only one meetcat at a time —
+	// neighbourhood. The trade-off — only one pageflip at a time —
 	// is acceptable for the single-operator workflow this tool
 	// serves; a daemon mode would need a port broker, but that's
 	// a separate target.
-	const meetcatPort = 49831
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", meetcatPort))
+	const pageflipPort = 49831
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", pageflipPort))
 	if err != nil {
-		return "", nil, fmt.Errorf("bind 127.0.0.1:%d: %w (is another meetcat already running?)", meetcatPort, err)
+		return "", nil, fmt.Errorf("bind 127.0.0.1:%d: %w (is another pageflip already running?)", pageflipPort, err)
 	}
 	addr := listener.Addr().(*net.TCPAddr)
 	url := fmt.Sprintf("http://127.0.0.1:%d/", addr.Port)

@@ -3,7 +3,7 @@
 
 // Package main — resolver: extract and look up reference strings from slide text.
 //
-// Implements 🎯T11: meetcat resolver — Task-mode agent that turns extracted
+// Implements 🎯T11: pageflip resolver — Task-mode agent that turns extracted
 // strings into hyperlinked references.
 package main
 
@@ -174,7 +174,7 @@ func (r *Resolver) lookupViaClaude(ctx context.Context, ref string, kind RefKind
 		Model:   "haiku",
 	})
 
-	ch, err := task.RunTask(ctx, prompt)
+	ch, err := task.Run(ctx, prompt)
 	if err != nil {
 		return &ResolvedRef{Kind: kind, Raw: ref}
 	}

@@ -1,7 +1,7 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
-// Package main — session log schema for meetcat.
+// Package main — session log schema for the pageflip orchestrator.
 //
 // Design principle: sensitivity by construction. No event type carries
 // free-form string fields that could contain meeting content, OCR text,
@@ -40,7 +40,7 @@ func (l *Logger) emit(v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		// Should never happen with well-typed structs; log to stderr.
-		fmt.Fprintf(os.Stderr, "meetcat: log marshal error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "pageflip: log marshal error: %v\n", err)
 		return
 	}
 	_, _ = fmt.Fprintf(l.w, "%s\n", data)
@@ -110,7 +110,7 @@ type SpecialistError struct {
 	Code string `json:"code"`
 }
 
-// MeetingEnd is emitted when meetcat processes all slides (or is signalled).
+// MeetingEnd is emitted when pageflip processes all slides (or is signalled).
 type MeetingEnd struct {
 	eventBase
 	SlidesProcessed int     `json:"slides_processed"`

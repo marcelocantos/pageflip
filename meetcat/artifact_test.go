@@ -127,7 +127,7 @@ func TestArtifactWriterFolderCreation(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := w.WriteSessionIDs(map[string]string{"neutral": "meetcat-999-neutral"}); err != nil {
+	if err := w.WriteSessionIDs(map[string]string{"neutral": "pageflip-999-neutral"}); err != nil {
 		t.Fatalf("WriteSessionIDs: %v", err)
 	}
 
@@ -140,8 +140,8 @@ func TestArtifactWriterFolderCreation(t *testing.T) {
 	if err := json.Unmarshal(data, &ids); err != nil {
 		t.Fatalf("unmarshal session-ids.json: %v", err)
 	}
-	if ids["neutral"] != "meetcat-999-neutral" {
-		t.Errorf("neutral session ID: got %q, want %q", ids["neutral"], "meetcat-999-neutral")
+	if ids["neutral"] != "pageflip-999-neutral" {
+		t.Errorf("neutral session ID: got %q, want %q", ids["neutral"], "pageflip-999-neutral")
 	}
 }
 

@@ -12,9 +12,9 @@ import (
 )
 
 // manifestFile is the basename of the per-meeting metadata JSON
-// written into {workDir}/{meetingID}/. Reading it gives `meetcat
-// resume <meeting-id>` enough information to re-spawn pageflip with
-// the same target args and reconstruct the SessionPool with the
+// written into {workDir}/{meetingID}/. Reading it gives `pageflip
+// resume <meeting-id>` enough information to re-spawn pageflip-capture
+// with the same target args and reconstruct the SessionPool with the
 // same meetingID — claudia auto-resumes the per-specialist Claude
 // Code sessions via their persisted JSONLs.
 const manifestFile = "meeting.json"
@@ -22,10 +22,10 @@ const manifestFile = "meeting.json"
 // Manifest is the on-disk record of one meeting's invocation
 // parameters. It is written early in the meeting (before the first
 // slide arrives) so that an accidental Ctrl-C still leaves enough
-// state on disk for `meetcat resume` to pick up where the operator
+// state on disk for `pageflip resume` to pick up where the operator
 // left off. Fields here are deliberately limited to what the resume
-// flow needs: target args for pageflip, work_dir, glossary cache,
-// and the specialist allow-list. Session IDs themselves live in
+// flow needs: target args for pageflip-capture, work_dir, glossary
+// cache, and the specialist allow-list. Session IDs themselves live in
 // session-ids.json (one file, one purpose) and are looked up by
 // (meeting_id, role) via specialistSessionID at resume time.
 type Manifest struct {
@@ -38,9 +38,9 @@ type Manifest struct {
 	Pageflip      PageflipArgs `json:"pageflip,omitempty"`
 }
 
-// PageflipArgs is the subset of pageflip CLI args that meetcat
+// PageflipArgs is the subset of pageflip-capture CLI args that pageflip
 // forwards on its behalf — everything the operator can specify via
-// `meetcat --region` etc. Empty fields mean "let pageflip pick"
+// `pageflip --region` etc. Empty fields mean "let pageflip-capture pick"
 // (typically the multi-monitor picker).
 type PageflipArgs struct {
 	Region      string `json:"region,omitempty"`
@@ -50,7 +50,7 @@ type PageflipArgs struct {
 }
 
 // toFlags renders the args back into the `--region X,Y,W,H`-style
-// strings that spawnPageflip forwards to the pageflip subprocess.
+// strings that spawnCapture forwards to the pageflip-capture subprocess.
 // Unset fields produce no flag, so the resulting slice mirrors what
 // the operator originally typed (or empty, meaning "run the
 // picker").
@@ -93,7 +93,7 @@ func WriteManifest(workDir string, m Manifest) error {
 }
 
 // ReadManifest loads the manifest for a given meeting. The meetingID
-// can be either the bare ID (`meetcat-1234`) or a path to the
+// can be either the bare ID (`pageflip-1234`) or a path to the
 // directory itself; ReadManifest resolves both forms relative to the
 // caller's cwd. Returns a structured error wrapping fs.ErrNotExist
 // when the manifest is absent so callers can distinguish "no such
