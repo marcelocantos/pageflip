@@ -16,9 +16,10 @@ a browser tab as the meeting progresses.
 brew install marcelocantos/tap/pageflip
 ```
 
-This installs the `pageflip` orchestrator (what you run) and its
+This installs the `pageflip` orchestrator (what you run), its
 internal helper `pageflip-capture` (the screen-capture engine that
-`pageflip` spawns as a subprocess).
+`pageflip` spawns as a subprocess), and `pageflip-feed` (a leftover
+headless consumer).
 
 For development from a local checkout:
 
@@ -36,7 +37,7 @@ the binary with "cannot be opened because the developer cannot be
 verified", remove the quarantine attribute:
 
 ```bash
-xattr -d com.apple.quarantine "$(which pageflip)" "$(which pageflip-capture)"
+xattr -d com.apple.quarantine "$(which pageflip)" "$(which pageflip-capture)" "$(which pageflip-feed)"
 ```
 
 You need to do this once per install. The error appears because the
@@ -101,8 +102,9 @@ output appears under each slide as it arrives.
 It spawns `pageflip-capture` (a Rust binary) as a subprocess. The
 capture engine owns:
 
-- Screen region / window picking, pHash-based deduplication, OCR via
-  Apple Vision.
+- Screen region / window picking, consecutive-frame RMS deduplication,
+  optional OCR via Apple Vision (used by `--redact-pii`; not yet
+  filled on the event stream).
 - The NDJSON event stream that the orchestrator consumes on stdout.
 
 This split exists because macOS screen-capture APIs are most
@@ -111,9 +113,14 @@ concurrency primitives and embedded web server. Users only ever
 invoke `pageflip` directly; `pageflip-capture` is an implementation
 detail.
 
-A third binary, `pageflip-feed`, is shipped for now but will be
-retired (see 🎯T34). If you have an existing workflow that calls
-`pageflip-feed` directly, it still works.
+A third binary, `pageflip-feed`, is shipped for now as a thin
+headless PNG-watch / NDJSON consumer. It may be retired before 1.0.
+If you have an existing workflow that calls `pageflip-feed` directly,
+it still works.
+
+Agent-oriented invocation notes for all three binaries:
+[`agents-guide.md`](agents-guide.md). The stability catalogue is
+[`STABILITY.md`](STABILITY.md).
 
 ## Development
 
@@ -131,13 +138,17 @@ workflow, including model-weight bootstrap and the audio invariant.
 
 ## Reporting bugs
 
-`pageflip doctor` prints a markdown diagnostic (versions, permission
-states, model cache inventory, recent session tail) designed to be
-pasted into a GitHub issue. It deliberately excludes meeting
+`pageflip doctor` prints a markdown diagnostic (orchestrator version,
+tools, auth state, recent session tail) designed to be pasted into a
+GitHub issue. `pageflip-capture doctor` covers Screen Recording
+permission and the HF model cache, and appends `pageflip doctor`
+unless `--no-pageflip`. Both reports deliberately exclude meeting
 content, window titles, OCR text, and transcript text — safe to
 paste.
 
 ```bash
+pageflip-capture doctor > report.md
+# or, orchestrator only:
 pageflip doctor > report.md
 ```
 

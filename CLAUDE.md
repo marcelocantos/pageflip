@@ -1,5 +1,12 @@
 # pageflip
 
+`pageflip` is the Go orchestrator users run. It owns the localhost
+web UI, specialist pool, and meeting manifest, and it spawns
+`pageflip-capture` (Rust) for region/window capture, RMS dedup, and
+the NDJSON event stream. `pageflip-feed` is a leftover headless
+consumer. There is no `meetcat` binary; Go source still lives under
+`meetcat/`.
+
 ## Release readiness
 
 release_readiness: ready
