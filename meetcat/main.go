@@ -1,7 +1,7 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
-// meetcat — consumer of pageflip's slide-event NDJSON stream.
+// pageflip — orchestrator that consumes pageflip-capture's slide-event NDJSON stream and dispatches each unique slide to a pool of Claude specialist agents.
 //
 // This is the 🎯T19.1 walking skeleton extended with:
 //   - 🎯T21: doctor subcommand for diagnostic output
@@ -38,24 +38,23 @@ const version = "0.2.0"
 // Falls back to "(dev)" when not provided.
 var gitSHA = "(dev)"
 
-const helpAgent = `meetcat --help-agent
-====================
+const helpAgent = `pageflip --help-agent
+=====================
 
 PURPOSE
-  Consume pageflip's slide-event NDJSON stream and drive parallel Claude
-  specialist sessions (dejargoniser, resolver, skeptic, constructive,
+  Consume pageflip-capture's slide-event NDJSON stream and drive parallel
+  Claude specialist sessions (dejargoniser, resolver, skeptic, constructive,
   neutral, contradictions) for each slide. This binary is the 🎯T19.x
   family's primary artifact.
 
 INVOCATION
-  pageflip --events-out stdout | meetcat
-  meetcat < events.jsonl
-  meetcat --log-file session.ndjson
-  meetcat doctor [--log-file session.ndjson]
-  meetcat glossary refresh --confluence-url https://company.atlassian.net/wiki
-  meetcat --help
-  meetcat --help-agent
-  meetcat --version
+  pageflip --no-spawn < events.jsonl
+  pageflip --log-file session.ndjson
+  pageflip doctor [--log-file session.ndjson]
+  pageflip glossary refresh --confluence-url https://company.atlassian.net/wiki
+  pageflip --help
+  pageflip --help-agent
+  pageflip --version
 
 SUBCOMMANDS
   doctor            Print a markdown diagnostic report (versions, tools, auth, log).
@@ -130,7 +129,7 @@ func writeSessionIDsIfPossible(pool *SessionPool, w io.Writer) {
 		MeetingID: pool.meetingID,
 	})
 	if err := aw.WriteSessionIDs(ids); err != nil {
-		fmt.Fprintf(w, "meetcat: write session-ids: %v\n", err)
+		fmt.Fprintf(w, "pageflip: write session-ids: %v\n", err)
 	}
 }
 
@@ -142,8 +141,8 @@ func printResumeHint(pool *SessionPool, w io.Writer) {
 	if pool == nil {
 		return
 	}
-	fmt.Fprintf(w, "\nmeetcat: meeting saved. To resume:\n")
-	fmt.Fprintf(w, "  meetcat resume %s\n", pool.meetingID)
+	fmt.Fprintf(w, "\npageflip: meeting saved. To resume:\n")
+	fmt.Fprintf(w, "  pageflip resume %s\n", pool.meetingID)
 }
 
 func main() {
@@ -154,7 +153,7 @@ func main() {
 			doctorFlags := flag.NewFlagSet("doctor", flag.ExitOnError)
 			logFile := doctorFlags.String("log-file", "", "Path to NDJSON session log to tail.")
 			if err := doctorFlags.Parse(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "meetcat doctor:", err)
+				fmt.Fprintln(os.Stderr, "pageflip doctor:", err)
 				os.Exit(2)
 			}
 			runDoctor(os.Stdout, *logFile)
@@ -168,7 +167,7 @@ func main() {
 			// specialist torn down at meeting end (and resume taking
 			// over via JSONL persistence), tmux attach is no longer
 			// the right primitive. Print a clear redirect.
-			fmt.Fprintln(os.Stderr, "meetcat attach is deprecated — use `meetcat resume <meeting-id>`")
+			fmt.Fprintln(os.Stderr, "pageflip attach is deprecated — use `pageflip resume <meeting-id>`")
 			fmt.Fprintln(os.Stderr, "(All specialists' sessions persist via Claude Code JSONL; resume re-spawns them with their accumulated context.)")
 			os.Exit(2)
 		case "resume":
@@ -185,18 +184,18 @@ func main() {
 	workDir := flag.String("work-dir", ".", "Working directory passed to claudia agents.")
 	specialistsFlag := flag.String("specialists", "", "Comma-separated list of specialists to start (default: all). E.g. skeptic,neutral")
 	glossaryCachePath := flag.String("glossary-cache", defaultGlossaryCachePath(), "Path to glossary JSON cache.")
-	noSpawn := flag.Bool("no-spawn", false, "Don't spawn pageflip; read slide events from stdin instead.")
-	regionFlag := flag.String("region", "", "Forwarded to pageflip as --region X,Y,W,H. Omit to run the multi-monitor picker.")
-	windowFlag := flag.Bool("window", false, "Forwarded to pageflip as --window (interactive window picker).")
-	windowTitleFlag := flag.String("window-title", "", "Forwarded to pageflip as --window-title SUBSTRING.")
-	windowIDFlag := flag.String("window-id", "", "Forwarded to pageflip as --window-id ID.")
+	noSpawn := flag.Bool("no-spawn", false, "Don't spawn pageflip-capture; read slide events from stdin instead.")
+	regionFlag := flag.String("region", "", "Forwarded to pageflip-capture as --region X,Y,W,H. Omit to run the multi-monitor picker.")
+	windowFlag := flag.Bool("window", false, "Forwarded to pageflip-capture as --window (interactive window picker).")
+	windowTitleFlag := flag.String("window-title", "", "Forwarded to pageflip-capture as --window-title SUBSTRING.")
+	windowIDFlag := flag.String("window-id", "", "Forwarded to pageflip-capture as --window-id ID.")
 	webDirFlag := flag.String("web-dir", "", "Dev-only: serve HTML/CSS/JS from this directory instead of the embedded copy. Reload the tab to pick up edits.")
 	flag.Parse()
 	enableAgents := !*noAgents
 
 	switch {
 	case *showVersion:
-		fmt.Printf("meetcat %s (sha: %s)\n", version, gitSHA)
+		fmt.Printf("pageflip %s (sha: %s)\n", version, gitSHA)
 		return
 	case *showHelpAgent:
 		fmt.Print(helpAgent)
@@ -212,7 +211,7 @@ func main() {
 		var err error
 		logger, f, err = NewFileLogger(*logFile)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "meetcat:", err)
+			fmt.Fprintln(os.Stderr, "pageflip:", err)
 			os.Exit(1)
 		}
 		defer f.Close()
@@ -237,7 +236,7 @@ func main() {
 	}
 
 	if err := runMeeting(cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "meetcat:", err)
+		fmt.Fprintln(os.Stderr, "pageflip:", err)
 		os.Exit(1)
 	}
 }
@@ -257,7 +256,7 @@ type meetingConfig struct {
 	Logger        *Logger
 
 	// OpenBrowser controls whether runMeeting auto-opens the user's
-	// default browser at the meetcat web URL. Fresh meetings set it
+	// default browser at the pageflip web URL. Fresh meetings set it
 	// true; resume sets it false because the operator's existing
 	// browser tab is still open from the prior run and will auto-
 	// reconnect via EventSource — opening a new tab would compete
@@ -269,7 +268,7 @@ type meetingConfig struct {
 	WebDir string
 }
 
-// runMeeting wires up the TUI, spawns pageflip (or reads stdin),
+// runMeeting wires up the TUI, spawns pageflip-capture (or reads stdin),
 // boots the specialist pool, drives the slide-event decode loop, and
 // shuts everything down cleanly. The same code path serves a fresh
 // meeting and a resumed one — only the meeting ID + per-specialist
@@ -281,13 +280,13 @@ func runMeeting(cfg meetingConfig) error {
 	if cfg.GlossaryCache != "" {
 		g, err := NewGlossaryCache(cfg.GlossaryCache)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "meetcat: glossary cache: %v (continuing without)\n", err)
+			fmt.Fprintf(os.Stderr, "pageflip: glossary cache: %v (continuing without)\n", err)
 		} else {
 			glossary = g
 		}
 	}
 
-	// Web mode: when agents are enabled and stderr is a TTY, meetcat
+	// Web mode: when agents are enabled and stderr is a TTY, pageflip
 	// serves a local HTTP/SSE page and opens it in the browser. The
 	// page renders specialist output as proper markdown and embeds
 	// each slide's PNG inline next to the analysis — neither of
@@ -306,14 +305,14 @@ func runMeeting(cfg meetingConfig) error {
 		}
 		sink = newWebSink(h, absWork)
 		webShutdown = shutdown
-		fmt.Fprintf(os.Stderr, "meetcat: open %s in your browser (Ctrl-C to stop)\n", url)
+		fmt.Fprintf(os.Stderr, "pageflip: open %s in your browser (Ctrl-C to stop)\n", url)
 		if cfg.OpenBrowser {
 			_ = openInBrowser(url)
 		}
 	}
 
 	// Persist the manifest as early as possible so an immediate
-	// Ctrl-C still leaves enough state on disk for `meetcat resume`
+	// Ctrl-C still leaves enough state on disk for `pageflip resume`
 	// to pick up. The manifest dir is also where session-ids.json
 	// will land at meeting end.
 	manifest := Manifest{
@@ -328,19 +327,19 @@ func runMeeting(cfg meetingConfig) error {
 	if err := WriteManifest(cfg.WorkDir, manifest); err != nil {
 		// Manifest write failure is loud but not fatal — the meeting
 		// can still proceed; resume just won't be available later.
-		fmt.Fprintf(os.Stderr, "meetcat: manifest write failed: %v (resume will not be available)\n", err)
+		fmt.Fprintf(os.Stderr, "pageflip: manifest write failed: %v (resume will not be available)\n", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Slide-event source: pipe pageflip's stdout through unless the
-	// caller has explicitly opted out (--no-spawn) or stdin is
+	// Slide-event source: pipe pageflip-capture's stdout through unless
+	// the caller has explicitly opted out (--no-spawn) or stdin is
 	// already a pipe (CI / tests).
 	var eventStream io.Reader = os.Stdin
 	var pageflipCleanup func()
 	if !cfg.NoSpawn && stdinIsTTY() {
-		stream, cleanup, err := spawnPageflip(ctx, sink, cfg.Pageflip.toFlags())
+		stream, cleanup, err := spawnCapture(ctx, sink, cfg.Pageflip.toFlags())
 		if err != nil {
 			return err
 		}
@@ -349,9 +348,9 @@ func runMeeting(cfg meetingConfig) error {
 	}
 
 	// Terminal Ctrl-C propagates to a process shutdown: cancel the
-	// context (SIGTERMs pageflip via cmd.Cancel so its stdout closes
-	// and our decoder hits EOF) and close stdin as a fallback for
-	// the --no-spawn case. The web tab will see the SSE connection
+	// context (SIGTERMs pageflip-capture via cmd.Cancel so its stdout
+	// closes and our decoder hits EOF) and close stdin as a fallback
+	// for the --no-spawn case. The web tab will see the SSE connection
 	// drop and stop receiving events.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -371,7 +370,7 @@ func runMeeting(cfg meetingConfig) error {
 
 	runErr := run(ctx, eventStream, sink, cfg.Logger, pool)
 
-	// Shutdown: kill pageflip, then close the web server (stops
+	// Shutdown: kill pageflip-capture, then close the web server (stops
 	// SSE), then the post-meeting writes (session IDs, resume hint)
 	// land on the real stderr.
 	if pageflipCleanup != nil {
@@ -410,19 +409,20 @@ func sortedAllowedNames(allow map[string]bool) []string {
 func runResume(args []string) {
 	resumeFlags := flag.NewFlagSet("resume", flag.ExitOnError)
 	if err := resumeFlags.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, "meetcat resume:", err)
+		fmt.Fprintln(os.Stderr, "pageflip resume:", err)
 		os.Exit(2)
 	}
 	rest := resumeFlags.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: meetcat resume <meeting-id-or-dir>")
+		fmt.Fprintln(os.Stderr, "usage: pageflip resume <meeting-id-or-dir>")
 		os.Exit(2)
 	}
 	target := rest[0]
 
-	// Accept both "meetcat-1234" (a bare ID, looked up under cwd) and
-	// "path/to/meetcat-1234" (an explicit directory). Either way,
-	// resolve the manifest under that directory.
+	// Accept both "pageflip-1234" (a bare ID, looked up under cwd) and
+	// "path/to/pageflip-1234" (an explicit directory). Either way,
+	// resolve the manifest under that directory. Legacy meetcat-* IDs
+	// also work since the resume command accepts any directory name.
 	manifestDir := target
 	if _, err := os.Stat(manifestDir); err != nil {
 		// Fall back to interpreting target as a bare ID under cwd.
@@ -430,7 +430,7 @@ func runResume(args []string) {
 	}
 	manifest, err := ReadManifest(manifestDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "meetcat resume: %v\n", err)
+		fmt.Fprintf(os.Stderr, "pageflip resume: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -448,9 +448,9 @@ func runResume(args []string) {
 		Pageflip:      manifest.Pageflip,
 	}
 
-	fmt.Fprintf(os.Stderr, "meetcat: resuming meeting %s (work_dir=%s)\n", cfg.MeetingID, cfg.WorkDir)
+	fmt.Fprintf(os.Stderr, "pageflip: resuming meeting %s (work_dir=%s)\n", cfg.MeetingID, cfg.WorkDir)
 	if err := runMeeting(cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "meetcat resume:", err)
+		fmt.Fprintln(os.Stderr, "pageflip resume:", err)
 		os.Exit(1)
 	}
 }
@@ -468,7 +468,7 @@ func namesToSet(names []string) map[string]bool {
 
 // stdinIsTTY reports whether stdin is connected to an interactive
 // terminal (not a pipe or redirected file). Used to decide whether
-// meetcat should spawn pageflip itself or consume the existing pipe.
+// pageflip should spawn pageflip-capture itself or consume the existing pipe.
 func stdinIsTTY() bool {
 	fi, err := os.Stdin.Stat()
 	if err != nil {
@@ -488,7 +488,7 @@ func run(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, poo
 
 // stderrIsTTY reports whether stderr is connected to an interactive
 // terminal. Used to decide whether to launch the bubbletea TUI; piped
-// stderr (CI, `meetcat 2>log`, tests) falls back to the streaming
+// stderr (CI, `pageflip 2>log`, tests) falls back to the streaming
 // path so output stays grep- and tee-friendly.
 func stderrIsTTY() bool {
 	fi, err := os.Stderr.Stat()
@@ -499,8 +499,8 @@ func stderrIsTTY() bool {
 }
 
 // runText reads slide events from in and routes every line of output
-// through sink. Lifecycle of any TUI / spawned pageflip is owned by
-// the caller; runText only knows about the event stream and the
+// through sink. Lifecycle of any TUI / spawned pageflip-capture is owned
+// by the caller; runText only knows about the event stream and the
 // specialist pool.
 func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger, pool *SessionPool) error {
 	reader := bufio.NewReader(in)
@@ -517,14 +517,14 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 		// Start all specialist agents immediately, in parallel, in a
 		// goroutine — do not wait for the first slide. This gives users
 		// a visible stream of "[skeptic] ready" etc. lines as soon as
-		// meetcat launches, instead of a silent wait.
+		// pageflip launches, instead of a silent wait.
 		go pool.StartAll(ctx)
 
 		defer func() {
 			pool.StopAll()
 			ts := pool.TurnSummary()
 			sink.SystemLine(fmt.Sprintf("%s specialist turn counts:",
-				colorize(colorSystem, "meetcat:")))
+				colorize(colorSystem, "pageflip:")))
 			for name, n := range ts {
 				sink.SystemLine(fmt.Sprintf("  %s %d", tag(name), n))
 			}
@@ -541,7 +541,7 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 			// treat it as a clean EOF so the deferred StopAll runs.
 			logger.LogMeetingEnd(count, 0)
 			sink.SystemLine(fmt.Sprintf("%s processed %d slide event(s)",
-				colorize(colorSystem, "meetcat:"), count))
+				colorize(colorSystem, "pageflip:"), count))
 			return nil
 		case err != nil:
 			logger.LogRejected("decode_error")
@@ -565,7 +565,7 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 		revisit, firstIdx, dist, rerr := revisits.classify(ev.Path)
 		if rerr != nil {
 			sink.SystemLine(fmt.Sprintf("%s slide [%d] revisit-detect error: %v (treating as new)",
-				colorize(colorSystem, "meetcat:"), count, rerr))
+				colorize(colorSystem, "pageflip:"), count, rerr))
 		}
 		if revisit {
 			sink.SystemLine(fmt.Sprintf(
@@ -581,7 +581,7 @@ func runText(ctx context.Context, in io.Reader, sink StreamSink, logger *Logger,
 		// dist is NaN when there were no priors to compare against.
 		if !math.IsNaN(dist) {
 			sink.SystemLine(fmt.Sprintf("%s slide [%d] closest-prior-slide RMS: %.2f",
-				colorize(colorSystem, "meetcat:"), count, dist))
+				colorize(colorSystem, "pageflip:"), count, dist))
 		}
 		// OpenSection feeds both the web view (which uses imagePath
 		// to compute a clean /slides/* URL) and the stderr fallback
@@ -613,19 +613,19 @@ func defaultGlossaryCachePath() string {
 // Currently only "glossary refresh" is implemented.
 func runGlossarySubcommand(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: meetcat glossary <refresh>")
+		fmt.Fprintln(os.Stderr, "usage: pageflip glossary <refresh>")
 		os.Exit(2)
 	}
 	switch args[0] {
 	case "refresh":
 		runGlossaryRefresh(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "meetcat glossary: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "pageflip glossary: unknown subcommand %q\n", args[0])
 		os.Exit(2)
 	}
 }
 
-// runGlossaryRefresh implements "meetcat glossary refresh".
+// runGlossaryRefresh implements "pageflip glossary refresh".
 // It scrapes Confluence for glossary/acronym pages and writes results to
 // the local cache. Pass --dry-run to preview without writing.
 func runGlossaryRefresh(args []string) {
@@ -635,36 +635,36 @@ func runGlossaryRefresh(args []string) {
 	workDir := fs.String("work-dir", ".", "Working directory passed to claudia agents.")
 	dryRun := fs.Bool("dry-run", false, "Show what would be added without writing to the cache.")
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, "meetcat glossary refresh:", err)
+		fmt.Fprintln(os.Stderr, "pageflip glossary refresh:", err)
 		os.Exit(2)
 	}
 
 	if *confluenceURL == "" {
-		fmt.Fprintln(os.Stderr, "meetcat glossary refresh: --confluence-url is required")
+		fmt.Fprintln(os.Stderr, "pageflip glossary refresh: --confluence-url is required")
 		os.Exit(2)
 	}
 
 	cache, err := NewGlossaryCache(*cachePath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "meetcat glossary refresh:", err)
+		fmt.Fprintln(os.Stderr, "pageflip glossary refresh:", err)
 		os.Exit(1)
 	}
 
 	before := cache.Len()
-	fmt.Fprintf(os.Stdout, "meetcat: glossary refresh from %s (cache has %d entries)\n", *confluenceURL, before)
+	fmt.Fprintf(os.Stdout, "pageflip: glossary refresh from %s (cache has %d entries)\n", *confluenceURL, before)
 	if *dryRun {
-		fmt.Fprintln(os.Stdout, "meetcat: --dry-run: no changes will be written")
+		fmt.Fprintln(os.Stdout, "pageflip: --dry-run: no changes will be written")
 	}
 
 	added, err := RefreshFromConfluence(context.Background(), *confluenceURL, cache, *workDir, *dryRun)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "meetcat glossary refresh:", err)
+		fmt.Fprintln(os.Stderr, "pageflip glossary refresh:", err)
 		// Don't exit — partial results may have been written.
 	}
 
 	if *dryRun {
-		fmt.Fprintf(os.Stdout, "meetcat: would add %d new entries\n", added)
+		fmt.Fprintf(os.Stdout, "pageflip: would add %d new entries\n", added)
 	} else {
-		fmt.Fprintf(os.Stdout, "meetcat: added %d new entries (cache now has %d)\n", added, cache.Len())
+		fmt.Fprintf(os.Stdout, "pageflip: added %d new entries (cache now has %d)\n", added, cache.Len())
 	}
 }

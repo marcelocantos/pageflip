@@ -25,7 +25,7 @@ const (
 	colorReset  = "\x1b[0m"
 	colorDim    = "\x1b[90m"
 	colorSlide  = "\x1b[1;97m" // bold bright white — slide event header
-	colorSystem = "\x1b[94m"   // bright blue — meetcat's own messages
+	colorSystem = "\x1b[94m"   // bright blue — pageflip's own messages
 	colorError  = "\x1b[31m"   // red — errors
 )
 
@@ -35,7 +35,7 @@ var (
 )
 
 // colorsOn reports whether stderr is a TTY — the sole gate on whether we
-// emit ANSI escapes. When meetcat is piped into another tool, output is
+// emit ANSI escapes. When pageflip is piped into another tool, output is
 // plain text so consumers (grep, tee, redirects) see unadorned tags.
 func colorsOn() bool {
 	colorsOnce.Do(func() {
@@ -65,7 +65,7 @@ func tag(name string) string {
 // slideSectionHeader renders the visual separator that opens a new
 // slide's section. It's printed the moment a slide event passes
 // validation in runText, so the operator gets immediate signal that
-// pageflip's output reached the head of meetcat's pipeline. The trailing
+// pageflip-capture's output reached the head of pageflip's pipeline. The trailing
 // long rule lets the eye scan back to the start of any slide quickly.
 func slideSectionHeader(count int, slideID, app, path string, tStartMs, durMs uint64) string {
 	if app == "" {

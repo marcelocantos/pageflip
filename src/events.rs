@@ -33,7 +33,7 @@ pub struct SlideEvent {
     pub t_start_ms: u64,
     pub t_end_ms: u64,
     /// Perceptual hash of the captured frame as lowercase hex. Enables
-    /// downstream revisit detection (e.g. meetcat suppressing specialist
+    /// downstream revisit detection (e.g. pageflip suppressing specialist
     /// re-analysis when a presenter navigates back to a previously-seen
     /// slide) without re-decoding the PNG.
     #[serde(skip_serializing_if = "Option::is_none")]

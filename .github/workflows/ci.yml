@@ -19,6 +19,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: meetcat/go.mod
+
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:

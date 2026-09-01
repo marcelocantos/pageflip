@@ -90,11 +90,11 @@ func TestRenderSlideMessageNullOCRSkipped(t *testing.T) {
 
 func TestMeetingSessionIDFormat(t *testing.T) {
 	id := MeetingSessionID()
-	if !strings.HasPrefix(id, "meetcat-") {
-		t.Errorf("expected meetcat- prefix; got %q", id)
+	if !strings.HasPrefix(id, "pageflip-") {
+		t.Errorf("expected pageflip- prefix; got %q", id)
 	}
-	// Should contain only "meetcat-" and digits.
-	suffix := strings.TrimPrefix(id, "meetcat-")
+	// Should contain only "pageflip-" and digits.
+	suffix := strings.TrimPrefix(id, "pageflip-")
 	for _, ch := range suffix {
 		if ch < '0' || ch > '9' {
 			t.Errorf("non-digit in session ID suffix %q: %q", suffix, ch)
@@ -112,7 +112,7 @@ func TestMeetingSessionIDUniqueAcrossTime(t *testing.T) {
 	id2 := MeetingSessionID()
 	// Both must be well-formed; they may or may not be equal if called
 	// within the same ms. Just verify structure, not uniqueness here.
-	if !strings.HasPrefix(id1, "meetcat-") || !strings.HasPrefix(id2, "meetcat-") {
+	if !strings.HasPrefix(id1, "pageflip-") || !strings.HasPrefix(id2, "pageflip-") {
 		t.Errorf("unexpected format: %q, %q", id1, id2)
 	}
 }
@@ -120,7 +120,7 @@ func TestMeetingSessionIDUniqueAcrossTime(t *testing.T) {
 func TestSpecialistSessionIDFormat(t *testing.T) {
 	// Claude Code's --session-id requires a UUID. Verify we produce one
 	// and that the derivation is deterministic per (meeting, specialist).
-	meetingID := "meetcat-1234567890"
+	meetingID := "pageflip-1234567890"
 	id := specialistSessionID(meetingID, "skeptic")
 	// UUID format: 8-4-4-4-12 hex groups separated by '-'.
 	uuidRE := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

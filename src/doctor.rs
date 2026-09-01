@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// Run `pageflip doctor`.
+/// Run `pageflip-capture doctor`.
 ///
 /// Writes a markdown report to stdout. Optionally tails `log_path` at the
-/// end of the report. Unless `skip_meetcat` is set, also invokes
-/// `meetcat doctor` (passing `meetcat_log` through as --log-file) and
+/// end of the report. Unless `skip_pageflip` is set, also invokes
+/// `pageflip doctor` (passing `pageflip_log` through as --log-file) and
 /// appends its output so a single command produces the full bug-report
 /// bundle.
-pub fn run(log_path: Option<&Path>, meetcat_log: Option<&Path>, skip_meetcat: bool) {
+pub fn run(log_path: Option<&Path>, pageflip_log: Option<&Path>, skip_pageflip: bool) {
     let mut out = String::with_capacity(4096);
 
     push_versions(&mut out);
@@ -29,24 +29,24 @@ pub fn run(log_path: Option<&Path>, meetcat_log: Option<&Path>, skip_meetcat: bo
         push_session_log(&mut out, path);
     }
 
-    if !skip_meetcat {
-        push_meetcat(&mut out, meetcat_log);
+    if !skip_pageflip {
+        push_pageflip(&mut out, pageflip_log);
     }
 
     print!("{out}");
 }
 
-// ── meetcat passthrough ──────────────────────────────────────────────────────
+// ── pageflip passthrough ─────────────────────────────────────────────────────
 
-fn push_meetcat(out: &mut String, log: Option<&Path>) {
+fn push_pageflip(out: &mut String, log: Option<&Path>) {
     out.push_str("\n---\n\n");
-    match which("meetcat") {
+    match which("pageflip") {
         None => {
-            out.push_str("# meetcat doctor\n\n");
+            out.push_str("# pageflip doctor\n\n");
             out.push_str(
-                "meetcat not found on `$PATH`. If you were running meetcat\n\
-                 alongside pageflip, install it and re-run `pageflip doctor`,\n\
-                 or run `meetcat doctor` separately and append its output.\n",
+                "pageflip not found on `$PATH`. If you were running pageflip\n\
+                 alongside pageflip-capture, install it and re-run `pageflip-capture doctor`,\n\
+                 or run `pageflip doctor` separately and append its output.\n",
             );
         }
         Some(path) => {
@@ -60,15 +60,15 @@ fn push_meetcat(out: &mut String, log: Option<&Path>) {
                     out.push_str(&String::from_utf8_lossy(&o.stdout));
                 }
                 Ok(o) => {
-                    out.push_str("# meetcat doctor\n\n");
+                    out.push_str("# pageflip doctor\n\n");
                     out.push_str(&format!(
-                        "`meetcat doctor` exited with status {:?}. stderr:\n\n```\n{}\n```\n",
+                        "`pageflip doctor` exited with status {:?}. stderr:\n\n```\n{}\n```\n",
                         o.status.code(),
                         String::from_utf8_lossy(&o.stderr).trim()
                     ));
                 }
                 Err(e) => {
-                    out.push_str("# meetcat doctor\n\n");
+                    out.push_str("# pageflip doctor\n\n");
                     out.push_str(&format!("failed to invoke `{}`: {e}\n", path.display()));
                 }
             }

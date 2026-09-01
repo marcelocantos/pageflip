@@ -20,6 +20,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: meetcat/go.mod
+
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
@@ -45,6 +50,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: meetcat/go.mod
+
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
@@ -54,15 +64,21 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build release binaries
+      - name: Build Rust release binaries
         run: cargo build --release
+
+      - name: Build Go orchestrator (pageflip)
+        run: |
+          cd meetcat
+          sha="$(git rev-parse --short HEAD)"
+          go build -ldflags "-X main.gitSHA=${sha}" -o ../target/release/pageflip .
 
       - name: Package tarball
         run: |
           version="${GITHUB_REF_NAME#v}"
           tarball="pageflip-${version}-darwin-arm64.tar.gz"
           tar czf "$tarball" \
-            -C target/release pageflip pageflip-feed
+            -C target/release pageflip pageflip-capture pageflip-feed
           echo "TARBALL=$tarball" >> "$GITHUB_ENV"
 
       - name: Upload tarball artifact
@@ -104,9 +120,11 @@ jobs:
           github_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           install: |-
             bin.install "pageflip"
+            bin.install "pageflip-capture"
             bin.install "pageflip-feed"
           test: |-
             system bin/"pageflip", "--version"
+            system bin/"pageflip-capture", "--version"
             system bin/"pageflip-feed", "--version"
           version: ${{ github.ref_name }}
           target_darwin_amd64: false

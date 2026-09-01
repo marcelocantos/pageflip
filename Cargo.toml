@@ -12,7 +12,7 @@ keywords = ["screenshot", "screen-capture", "slides", "meeting", "perceptual-has
 categories = ["command-line-utilities", "multimedia"]
 
 [[bin]]
-name = "pageflip"
+name = "pageflip-capture"
 path = "src/main.rs"
 
 [[bin]]

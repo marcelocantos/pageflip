@@ -75,8 +75,8 @@ Weights land in `~/.cache/huggingface/hub/`. Runtime uses
 ## Filing bugs
 
 Use the [Bug report](/.github/ISSUE_TEMPLATE/bug_report.yml) template. Paste
-the output of `pageflip doctor` and (if applicable) `meetcat doctor` — these
-commands emit a sensitivity-safe markdown report containing versions,
+the output of `pageflip doctor` — this
+command emits a sensitivity-safe markdown report containing versions,
 permission states, model cache status, and counts. They do **not** include
 meeting content, window titles, OCR, or transcript text.
 

@@ -35,8 +35,8 @@ func TestDoctorVersionsSection(t *testing.T) {
 	runDoctor(&buf, "")
 	out := buf.String()
 
-	if !strings.Contains(out, "meetcat") {
-		t.Error("Versions section missing 'meetcat'")
+	if !strings.Contains(out, "pageflip") {
+		t.Error("Versions section missing 'pageflip'")
 	}
 	if !strings.Contains(out, "Go runtime") {
 		t.Error("Versions section missing 'Go runtime'")

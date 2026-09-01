@@ -23,7 +23,7 @@
 //! stop — that would break the invariant the project depends on.
 
 // Many public / pub(super) items here are part of the Transcriber-facing
-// API surface for T9.2 (WhisperX) and will be consumed by the meetcat-side
+// API surface for T9.2 (WhisperX) and will be consumed by the pageflip-side
 // slide-event stream (T18). They're intentionally defined now so the
 // boundary is in place before real consumers arrive.
 #![allow(dead_code)]

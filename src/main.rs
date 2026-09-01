@@ -45,25 +45,25 @@ const HELP_AGENT: &str = include_str!("help_agent.txt");
 enum Cmd {
     /// Print a markdown diagnostics report for bug reports.
     Doctor {
-        /// Tail the last 200 lines of pageflip's session log into the report.
+        /// Tail the last 200 lines of pageflip-capture's session log into the report.
         #[arg(long, value_name = "PATH")]
         log: Option<PathBuf>,
-        /// Tail the last 200 lines of meetcat's session log into the report
-        /// (passed through to `meetcat doctor --log-file`).
+        /// Tail the last 200 lines of pageflip's session log into the report
+        /// (passed through to `pageflip doctor --log-file`).
         #[arg(long, value_name = "PATH")]
-        meetcat_log: Option<PathBuf>,
-        /// Skip invoking `meetcat doctor` even if it is on PATH.
+        pageflip_log: Option<PathBuf>,
+        /// Skip invoking `pageflip doctor` even if it is on PATH.
         #[arg(long)]
-        no_meetcat: bool,
+        no_pageflip: bool,
     },
 }
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "pageflip",
+    name = "pageflip-capture",
     version,
     about = "Capture slides from a screen region whenever they change",
-    long_about = "pageflip watches a region of the screen and writes a PNG each time the \
+    long_about = "pageflip-capture watches a region of the screen and writes a PNG each time the \
                   contents change meaningfully (as measured by perceptual-hash Hamming \
                   distance). It is designed to feed a live stream of slides into a Claude \
                   Code session during a meeting."
@@ -233,11 +233,11 @@ fn main() -> ExitCode {
 
     if let Some(Cmd::Doctor {
         log,
-        meetcat_log,
-        no_meetcat,
+        pageflip_log,
+        no_pageflip,
     }) = &cli.command
     {
-        doctor::run(log.as_deref(), meetcat_log.as_deref(), *no_meetcat);
+        doctor::run(log.as_deref(), pageflip_log.as_deref(), *no_pageflip);
         return ExitCode::SUCCESS;
     }
 
@@ -343,9 +343,9 @@ fn run(cli: &Cli) -> Result<(), String> {
         let tick_start = std::time::Instant::now();
 
         // SaveResult carries the Hamming distance for a future side
-        // channel (e.g. piping per-tick health into meetcat's TUI
+        // channel (e.g. piping per-tick health into pageflip's TUI
         // status bar). Stderr per-tick logging was retired in favour of
-        // meetcat's bubbletea status bar — the operator wants one
+        // pageflip's bubbletea status bar — the operator wants one
         // authoritative place to watch the pipeline, not interleaved
         // stderr streams.
         match capture_once(
@@ -592,7 +592,7 @@ fn capture_once(
             path: absolute,
             t_start_ms,
             t_end_ms,
-            phash: None, // retired in favour of meetcat-side RMS over the saved PNG
+            phash: None, // retired in favour of pageflip-side RMS over the saved PNG
             ocr: None,
             transcript_window: None,
             frontmost_app: None,
@@ -645,7 +645,10 @@ fn install_signal_handler() -> Result<mpsc::Receiver<()>, String> {
 }
 
 fn default_output_dir_name() -> String {
-    format!("pageflip-{}", OffsetDateTime::now_utc().unix_timestamp())
+    format!(
+        "pageflip-capture-{}",
+        OffsetDateTime::now_utc().unix_timestamp()
+    )
 }
 
 fn timestamp_slug() -> String {
