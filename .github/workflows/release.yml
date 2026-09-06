@@ -12,13 +12,27 @@ permissions:
 jobs:
   # ── Job 1: gate ──────────────────────────────────────────────────────────────
   test:
-    name: Bullseye gate
+    name: Gate
     runs-on: macos-14
     steps:
+      # meetcat/go.mod replaces claudia with ../../claudia, so claudia must sit
+      # beside the pageflip checkout for the Go leg of `make gate` to resolve.
       - uses: actions/checkout@v6
+        with:
+          path: pageflip
+
+      - uses: actions/checkout@v6
+        with:
+          repository: marcelocantos/claudia
+          path: claudia
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pageflip/meetcat/go.mod
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -26,12 +40,13 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+            pageflip/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('pageflip/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Run bullseye invariants
-        run: make bullseye
+      - name: Run the gate
+        working-directory: pageflip
+        run: make gate
 
   # ── Job 2: build ─────────────────────────────────────────────────────────────
   # macOS arm64 only — the project is macOS-only (T6/T7 deleted).
