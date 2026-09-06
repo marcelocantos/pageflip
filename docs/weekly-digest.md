@@ -4,6 +4,13 @@
 and produces a meta-pattern digest via `claude -p`. A launchd job runs it every
 Sunday at 09:00.
 
+> **Status:** the digest expects `decisions.md`, `actions.md`,
+> `open-questions.md`, and `contradictions.md` in each meeting folder. meetcat
+> has that writer (`meetcat/artifact.go`) but does not yet call it during a
+> run, so on today's build the digest finds only `meeting.json` and
+> `session-ids.json` and has nothing to summarise. Point it at hand-assembled
+> folders until the artifact pass is wired in.
+
 ## How it works
 
 Each time meetcat processes a meeting it writes a folder under the meetings
@@ -38,8 +45,10 @@ piped to `claude -p`. The response is written to
 
 ### Prerequisites
 
-- [`claude` CLI](https://github.com/anthropics/anthropic-tools) installed and
+- [`claude` CLI](https://github.com/anthropics/claude-code) installed and
   authenticated (`claude --version`).
+- bash 4 or newer on `PATH` (the script uses `mapfile`, which macOS's stock
+  bash 3.2 does not have): `brew install bash`.
 - meetcat writing artifact folders to a stable directory (e.g.
   `~/meetings`).
 

@@ -50,7 +50,8 @@ Companion report with:
 - meetcat version + Go runtime
 - tmux + claude CLI availability
 - Anthropic auth state
-- Active claudia sessions (once 🎯T19.2 lands)
+- Active subprocesses (a placeholder: `meetcat doctor` runs standalone and
+  cannot enumerate a live meeting's specialist sessions)
 - Recent session log tail (if `--log-file` was set)
 
 ## 3. Session log

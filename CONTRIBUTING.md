@@ -74,7 +74,7 @@ Weights land in `~/.cache/huggingface/hub/`. Runtime uses
 
 ## Filing bugs
 
-Use the [Bug report](/.github/ISSUE_TEMPLATE/bug_report.yml) template. Paste
+Use the [Bug report](.github/ISSUE_TEMPLATE/bug_report.yml) template. Paste
 the output of `pageflip doctor` and (if applicable) `meetcat doctor` — these
 commands emit a sensitivity-safe markdown report containing versions,
 permission states, model cache status, and counts. They do **not** include
@@ -84,7 +84,6 @@ See [`docs/bug-report.md`](docs/bug-report.md) for the full flow.
 
 ## Target graph
 
-Ongoing work is tracked in `bullseye.yaml` (rendered view in `docs/targets.md`
-if present). Each target is a desired end-state with testable acceptance
-criteria. Adding a new capability typically means adding a new target rather
+Ongoing work is tracked in `bullseye.yaml`. Each target is a desired
+end-state with testable acceptance criteria. Adding a new capability typically means adding a new target rather
 than piling into an existing one.

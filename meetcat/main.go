@@ -42,51 +42,65 @@ const helpAgent = `meetcat --help-agent
 ====================
 
 PURPOSE
-  Consume pageflip's slide-event NDJSON stream and drive parallel Claude
-  specialist sessions (dejargoniser, resolver, skeptic, constructive,
-  neutral, contradictions) for each slide. This binary is the 🎯T19.x
-  family's primary artifact.
+  Run a meeting: spawn pageflip (or read its slide-event NDJSON from stdin),
+  feed each slide to persistent Claude Code specialist sessions (skeptic,
+  constructive, neutral, dejargoniser, contradictions), show their output
+  in a local web UI, and write an artifact folder at meeting stop.
 
 INVOCATION
-  pageflip --events-out stdout | meetcat
-  meetcat < events.jsonl
-  meetcat --log-file session.ndjson
-  meetcat doctor [--log-file session.ndjson]
-  meetcat glossary refresh --confluence-url https://company.atlassian.net/wiki
-  meetcat --help
-  meetcat --help-agent
-  meetcat --version
+  meetcat [--region X,Y,W,H | --window | --window-title S | --window-id ID]
+  pageflip --events-out stdout | meetcat --no-spawn
+  meetcat --no-agents                 # decode-only, no Claude sessions
+  meetcat --specialists skeptic,neutral
+  meetcat resume <meeting-id-or-dir>
+  meetcat glossary refresh --confluence-url URL [--dry-run]
+  meetcat doctor [--log-file PATH]
+  meetcat --help | --help-agent | --version
 
 SUBCOMMANDS
-  doctor            Print a markdown diagnostic report (versions, tools, auth, log).
-  glossary refresh  Scrape Confluence for glossary entries and populate the cache.
+  resume            Re-spawn a past meeting's specialists from meetcat-<id>/
+                    (meeting.json + session-ids.json).
+  glossary refresh  Scrape Confluence for glossary entries into the cache.
+                    --confluence-url is required; --cache-path, --work-dir,
+                    --dry-run are optional.
+  doctor            Print a markdown diagnostic report (versions, tools,
+                    auth, optional log tail). No meeting content.
 
 FLAGS
-  --log-file <path>       Write a structured NDJSON session log to <path>.
-                          Events contain no meeting content — only identifiers,
-                          token counts, costs, and categorical codes.
-  --agents                Spawn claudia specialist sessions for each slide.
-  --work-dir <path>       Working directory passed to claudia agents.
-  --glossary-cache <path> Path to glossary JSON cache (default: ~/.pageflip/glossary.json).
+  --no-agents             Do not start specialist sessions.
+  --no-spawn              Read slide events from stdin instead of spawning
+                          pageflip.
+  --region/--window/--window-title/--window-id
+                          Forwarded to pageflip. Omit all for the picker.
+  --work-dir <path>       Root for meetcat-<id>/ artifact folders. Default ".".
+  --specialists <list>    Comma-separated subset. Default: all five.
+  --glossary-cache <path> Default ~/.pageflip/glossary.json.
+  --log-file <path>       Content-free NDJSON session log (append).
+  --web-dir <path>        Dev only: serve the UI from a directory.
 
-INPUT CONTRACT
-  Stdin is NDJSON: one JSON object per newline, matching
-  docs/slide-event-schema.json in the pageflip repo. Required fields per
-  event: slide_id (string), path (string), t_start_ms (uint), t_end_ms
-  (uint). Optional: ocr (array), transcript_window (array),
-  frontmost_app (string).
+INPUT CONTRACT (--no-spawn)
+  Stdin is NDJSON matching docs/slide-event-schema.json. Required per
+  event: slide_id, path, t_start_ms, t_end_ms. Optional: ocr,
+  transcript_window, frontmost_app.
 
 OUTPUT CONTRACT
-  TTY + --agents: bubbletea TUI with one pane per specialist.
-  Otherwise: one line per validated event on stderr, plus a terminal summary.
+  Web UI at http://127.0.0.1:49831/ (loopback only): /, /meeting,
+  /events (SSE), /slides/<rel>. Served only when specialists are
+  enabled and stderr is a TTY; otherwise output goes to stderr.
+  Meeting folder meetcat-<id>/ under --work-dir: meeting.json at
+  startup (what resume reads) and session-ids.json at stop. Slide
+  PNGs stay in pageflip's own output directory. The summary artifact
+  (decisions.md, actions.md, open-questions.md, contradictions.md,
+  references.json) is implemented in artifact.go but not yet wired
+  into a run.
 
 EXIT CODES
-  0  Clean exit at EOF with all events validated.
-  1  Malformed JSON or missing required fields.
-  2  CLI argument parse error (flag package default).
+  0  Clean exit.
+  1  Malformed input or a runtime failure.
+  2  CLI argument parse error, or a removed subcommand (attach).
 
 TARGETS
-  See pageflip's bullseye.yaml for the T19.x and T21 families.
+  See bullseye.yaml in the repo root.
 `
 
 // slideEvent mirrors the shape pageflip emits under --events-out. Fields

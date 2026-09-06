@@ -115,6 +115,9 @@ Snapshot as of v0.2.0.
 
 ## Gaps and prerequisites for 1.0
 
+- [ ] Meeting summary artifact (🎯T38) — `WriteArtifact` exists in
+      `meetcat/artifact.go` but has no caller on the meeting-stop path, so a
+      meeting folder holds only `meeting.json` and `session-ids.json` today.
 - [ ] Modes feature (🎯T30) — attendee/presenter specialist sets; default attendee. Currently the specialists are presenter-biased.
 - [ ] Video-detection auto-suspend (🎯T31) — without this, a video clip on a slide saturates the analysis pipeline.
 - [ ] Daemon mode + meeting catalogue UI — meetcat as a long-running brew service with a front page listing past meetings.

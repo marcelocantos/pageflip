@@ -3,12 +3,13 @@ pageflip --help-agent
 
 PURPOSE
   Capture a region of the screen on a timer and write a PNG whenever the
-  contents change more than a configurable perceptual-hash threshold. The
-  primary consumer is a Claude Code session that receives each new slide
-  as it lands.
+  contents change more than a configurable RMS pixel-difference threshold.
+  The primary consumer is meetcat (or a Claude Code session via
+  pageflip-feed) that receives each new slide as it lands.
 
 INVOCATION
-  pageflip [--region X,Y,W,H] [--interval SECS] [--threshold N] [--output DIR]
+  pageflip [--region X,Y,W,H] [--interval SECS] [--threshold RMS] [--output DIR]
+  pageflip doctor [--log PATH] [--meetcat-log PATH] [--no-meetcat]
   pageflip --window                  # interactive window picker on stdin
   pageflip --window-title SUBSTRING
   pageflip --window-id ID
@@ -29,8 +30,8 @@ OPTIONS
                      and height. Captured PNGs are written at the display's
                      physical-pixel resolution, so on a 2x Retina display a
                      200x200 region yields a 400x400 PNG — full-resolution,
-                     not blurred. Required until the interactive picker
-                     (🎯T2) lands.
+                     not blurred. With no target flag the interactive
+                     region picker opens instead.
   --crop             After resolving a window target, take a one-shot snapshot
                      of the window and open an interactive crop picker. The
                      user drags a rectangle on the snapshot; the selection is
@@ -48,7 +49,13 @@ OPTIONS
                      transcript segments are surfaced downstream.
   --transcriber KIND Transcriber to use with --audio. `null` (default)
                      discards samples and prints a batch count on stop.
-                     WhisperX support arrives with 🎯T9.2.
+                     `whisperx` runs scripts/transcribe.py through `uv`
+                     (faster-whisper; needs the model weights listed in
+                     CONTRIBUTING.md) and writes transcript.jsonl.
+  --whisperx-model M Whisper model for --transcriber whisperx. Default:
+                     large-v3.
+  --diarize          With whisperx, add speaker_id to each segment via
+                     pyannote (gated weights; HF token required).
   --events-out SPEC  Emit one structured JSON object per saved slide
                      (NDJSON) to SPEC instead of the legacy path-per-line
                      stdout contract. SPEC accepts three forms:
@@ -61,17 +68,22 @@ OPTIONS
                      event as it lands. The schema is documented in
                      docs/slide-event-schema.json. Optional fields
                      (ocr, transcript_window, frontmost_app) are omitted
-                     until the corresponding capabilities land
-                     (🎯T10.2, 🎯T9.2, 🎯T10.3).
+                     when the producing capability is off.
   --redact-faces     Run every saved frame through Apple Vision's face
                      detector and blur the detected rectangles before the
                      PNG is written. macOS only. No-op if no faces are
-                     detected. The first leg of 🎯T10's redaction pipeline;
-                     PII text redaction (T10.2) and egress-gating (T10.3)
-                     are not yet implemented.
-  --interval SECS    Seconds between captures. Floating-point. Default: 2.
-  --threshold N      Minimum pHash Hamming distance from the last saved
-                     frame required to save a new frame. Default: 10.
+                     detected.
+  --redact-pii       OCR every saved frame with Apple Vision and mask
+                     emails, phone numbers, credit cards, government IDs,
+                     and IP addresses before the PNG is written.
+  --paranoid DIR     Also save the unredacted original of every frame to
+                     DIR; redacted frames still go to --output.
+  --interval SECS    Seconds between captures. Floating-point. Default: 1.
+  --threshold RMS    Minimum mean per-channel RMS pixel difference (0–255
+                     scale) from the last saved frame required to save a
+                     new frame. Default: 5.
+  --log-file PATH    Append a content-free NDJSON session log (numbers,
+                     enum codes, hashed IDs) for `pageflip doctor --log`.
   --output DIR       Directory to write PNGs into. Default: a timestamped
                      directory under the current working directory.
   --version          Print version and exit.
@@ -101,16 +113,16 @@ OUTPUT CONTRACT
           t_start_ms   — Unix epoch ms when capture of this frame began
           t_end_ms     — Unix epoch ms when the PNG was fully written
       Optional fields (omitted when capability is not yet active):
-          ocr              — OCR words (🎯T10.2)
-          transcript_window — audio transcript segments (🎯T9.2)
-          frontmost_app    — foreground app at capture time (🎯T10.3)
+          ocr              — OCR words (--redact-pii)
+          transcript_window — audio transcript segments (--audio)
+          frontmost_app    — foreground app at capture time
       Each line is flushed immediately. Consume with:
           pageflip --events-out stdout ... | pageflip-feed --pipe ...
 
 LOOP BEHAVIOUR
-  pageflip runs an interval loop: capture, hash with pHash (8x8 DCT +
-  mean), compare to the last saved frame's hash, and save only when the
-  Hamming distance ≥ --threshold. The first frame always saves. Tick
+  pageflip runs an interval loop: capture, compute the mean per-channel
+  RMS difference from the last saved frame's pixels, and save only when
+  it is ≥ --threshold. The first frame always saves. Tick
   cadence targets --interval; if a capture overruns, the next tick fires
   immediately. Ctrl-C (SIGINT) breaks the loop after the in-flight
   capture completes and exits 0.
@@ -121,17 +133,17 @@ LOOP BEHAVIOUR
   resizes the cropped region covers the same proportional sub-area.
 
 PLATFORM STATUS
-  macOS arm64   🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T2, 🎯T3, 🎯T4, 🎯T5,
-                🎯T9.1, 🎯T9.2, 🎯T10.1, 🎯T18, 🎯T19.1 complete
-                (region/window capture, dedup loop, pickers, crop, feeder
-                 binary, audio capture + WhisperX transcription, face-blur
-                 redactor, structured slide-event NDJSON, meetcat shell)
+  macOS arm64   region/window capture, RMS dedup loop, pickers, crop,
+                feeder binary, audio capture + WhisperX transcription and
+                diarisation, face-blur and PII redaction, paranoid saver,
+                structured slide-event NDJSON, doctor, session log.
   Non-macOS     not supported; the project is macOS-only by decision.
 
 PERMISSIONS (macOS)
   Requires Screen Recording permission (System Settings > Privacy &
-  Security > Screen Recording). On first run the OS prompt appears; if
-  the user denies, pageflip exits with a readable error (🎯T1.2).
+  Security > Screen Recording); --audio also needs Microphone. On first
+  run the OS prompt appears; if the user denies, pageflip exits with a
+  readable error.
 
 TARGETS
   See bullseye.yaml in the repo root for the full target graph.

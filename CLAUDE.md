@@ -1,4 +1,6 @@
-# pageflip
+Captures slides from screen-shared meetings and runs Claude specialist sessions over them (pageflip + meetcat).
+
+@AGENTS.md
 
 ## Release readiness
 

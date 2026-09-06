@@ -64,9 +64,10 @@ enum Cmd {
     version,
     about = "Capture slides from a screen region whenever they change",
     long_about = "pageflip watches a region of the screen and writes a PNG each time the \
-                  contents change meaningfully (as measured by perceptual-hash Hamming \
-                  distance). It is designed to feed a live stream of slides into a Claude \
-                  Code session during a meeting."
+                  contents change meaningfully (as measured by the mean per-channel RMS \
+                  pixel difference from the last saved frame). It is designed to feed a \
+                  live stream of slides into meetcat, or into a Claude Code session via \
+                  pageflip-feed, during a meeting."
 )]
 #[command(group(
     clap::ArgGroup::new("target")
@@ -342,12 +343,11 @@ fn run(cli: &Cli) -> Result<(), String> {
     loop {
         let tick_start = std::time::Instant::now();
 
-        // SaveResult carries the Hamming distance for a future side
-        // channel (e.g. piping per-tick health into meetcat's TUI
-        // status bar). Stderr per-tick logging was retired in favour of
-        // meetcat's bubbletea status bar — the operator wants one
-        // authoritative place to watch the pipeline, not interleaved
-        // stderr streams.
+        // SaveResult is deliberately just Saved/Deduped: the per-tick
+        // RMS distance stays inside Dedup (classify_detail) because
+        // stderr per-tick logging was retired in favour of meetcat's
+        // status display — the operator wants one authoritative place
+        // to watch the pipeline, not interleaved stderr streams.
         match capture_once(
             backend.as_ref(),
             &target,
