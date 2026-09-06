@@ -440,7 +440,9 @@ func (p *SessionPool) startSpecialist(ctx context.Context, spec specialistDef, a
 	// section header even when the response arrives long after a
 	// newer slide has scrolled past. 🎯T19.4: wrap bare URLs with
 	// OSC 8 hyperlinks.
-	agent.OnEvent(func(ev claudia.Event) {
+	// SubscribeEvents returns an unsubscribe token. The subscription is
+	// meant to last as long as the agent does, so the token is dropped.
+	agent.SubscribeEvents(func(ev claudia.Event) {
 		if ev.Type == "assistant" && ev.Text != "" {
 			st.mu.Lock()
 			slideID := st.currentSlideID
