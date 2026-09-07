@@ -29,7 +29,7 @@ impl MacOsCapture {
 
 impl Capture for MacOsCapture {
     fn capture(&self, region: Region) -> Result<Frame, CaptureError> {
-        capture_via_screencapture(region)
+        run_screencapture(&screencapture_region_args(region))
     }
 
     fn list_windows(&self) -> Result<Vec<WindowInfo>, CaptureError> {
@@ -60,18 +60,15 @@ impl Capture for MacOsCapture {
 
     fn capture_window(&self, spec: &WindowSpec) -> Result<Frame, CaptureError> {
         let window = find_window_for_spec(spec)?;
-        let image = window
-            .capture_image()
-            .map_err(|e| classify_xcap_error(e, "Window::capture_image"))?;
-        Ok(Frame {
-            width: image.width(),
-            height: image.height(),
-            rgba: image.into_raw(),
-        })
+        let id = window
+            .id()
+            .map_err(|e| classify_xcap_error(e, "Window::id"))?;
+        // xcap is used only to resolve the spec to a window id. The pixels come
+        // from screencapture for the same freshness reason region capture does.
+        run_screencapture(&screencapture_window_args(id))
     }
 }
 
-#[allow(dead_code)]
 fn find_window_for_spec(spec: &WindowSpec) -> Result<Window, CaptureError> {
     let windows = Window::all().map_err(|e| classify_xcap_error(e, "Window::all"))?;
 
@@ -128,25 +125,53 @@ fn windows_to_infos(windows: Vec<Window>) -> Vec<super::WindowInfo> {
         .collect()
 }
 
-/// Capture a region by shelling out to `/usr/sbin/screencapture`. Apple's
-/// own CLI uses the modern, supported capture path (ScreenCaptureKit on
-/// recent macOS releases) and reliably returns a fresh frame on every
-/// invocation — unlike xcap's CGWindowListCreateImage path, which returns
-/// stale cached pixels under sub-second polling on macOS 14+.
-fn capture_via_screencapture(region: Region) -> Result<Frame, CaptureError> {
-    // -R x,y,w,h captures the rectangle in *global display* coordinates.
-    // -t png writes PNG. -x suppresses the shutter sound and screen flash.
-    // -o omits the window shadow (no-op for region capture but harmless).
+/// Arguments selecting a screen rectangle.
+///
+/// `-R x,y,w,h` captures the rectangle in *global display* coordinates,
+/// `-t png` writes PNG, `-x` suppresses the shutter sound and screen flash,
+/// and `-o` omits the window shadow (a no-op for region capture, harmless).
+fn screencapture_region_args(region: Region) -> Vec<String> {
+    vec![
+        "-R".to_string(),
+        format!("{},{},{},{}", region.x, region.y, region.w, region.h),
+        "-t".to_string(),
+        "png".to_string(),
+        "-x".to_string(),
+        "-o".to_string(),
+    ]
+}
+
+/// Arguments selecting a single window by its CGWindowID.
+///
+/// `-l <id>` is screencapture's window-capture selector; here `-o` genuinely
+/// matters, since without it the captured PNG is padded with the window's
+/// drop shadow and its dimensions drift between captures.
+fn screencapture_window_args(window_id: u32) -> Vec<String> {
+    vec![
+        "-l".to_string(),
+        window_id.to_string(),
+        "-t".to_string(),
+        "png".to_string(),
+        "-x".to_string(),
+        "-o".to_string(),
+    ]
+}
+
+/// Capture by shelling out to `/usr/sbin/screencapture`. Apple's own CLI uses
+/// the modern, supported capture path (ScreenCaptureKit on recent macOS
+/// releases) and reliably returns a fresh frame on every invocation — unlike
+/// xcap's CGWindowListCreateImage path, which returns stale cached pixels
+/// under sub-second polling on macOS 14+. Both region and window capture go
+/// through here so neither can quietly regress onto the stale API.
+fn run_screencapture(target_args: &[String]) -> Result<Frame, CaptureError> {
     let tmp = tempfile::Builder::new()
         .prefix("pageflip-")
         .suffix(".png")
         .tempfile()
         .map_err(|e| CaptureError::BackendFailed(format!("tempfile: {e}")))?;
 
-    let rect = format!("{},{},{},{}", region.x, region.y, region.w, region.h);
-
     let output = Command::new("/usr/sbin/screencapture")
-        .args(["-R", &rect, "-t", "png", "-x", "-o"])
+        .args(target_args)
         .arg(tmp.path())
         .output()
         .map_err(|e| CaptureError::BackendFailed(format!("screencapture spawn: {e}")))?;
@@ -192,5 +217,59 @@ fn classify_xcap_error(err: xcap::XCapError, op: &str) -> CaptureError {
         CaptureError::PermissionDenied(msg)
     } else {
         CaptureError::BackendFailed(format!("{op}: {msg}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_args_select_the_rectangle_in_global_coordinates() {
+        let args = screencapture_region_args(Region {
+            x: 10,
+            y: 20,
+            w: 300,
+            h: 400,
+        });
+        assert_eq!(args[0], "-R");
+        assert_eq!(args[1], "10,20,300,400");
+        assert!(args.iter().any(|a| a == "-x"), "shutter sound must be off");
+    }
+
+    #[test]
+    fn window_args_select_the_window_by_id_without_its_shadow() {
+        let args = screencapture_window_args(4_242);
+        assert_eq!(args[0], "-l");
+        assert_eq!(args[1], "4242");
+        assert!(
+            args.iter().any(|a| a == "-o"),
+            "window capture must drop the shadow, or frame dimensions drift"
+        );
+    }
+
+    /// The whole point of the screencapture detour is freshness: xcap's
+    /// `Window::capture_image` goes through CGWindowListCreateImage, which
+    /// hands back stale cached pixels under sub-second polling on macOS 14+.
+    /// Region capture was moved off it; window capture silently stayed on it
+    /// for a whole release. This fails the moment either path goes back.
+    #[test]
+    fn no_capture_path_uses_xcaps_stale_image_api() {
+        // Split so this assertion is not itself a match.
+        let stale_api = concat!("capture_", "image()");
+        let source = include_str!("macos.rs");
+        for (n, line) in source.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            assert!(
+                !line.contains(stale_api),
+                "src/capture/macos.rs:{} calls xcap's {}; capture must go through \
+                 run_screencapture() instead: {}",
+                n + 1,
+                stale_api,
+                line.trim()
+            );
+        }
     }
 }
