@@ -23,7 +23,7 @@ floors:            # per-dimension held-tier ratchet; below floor => DRIFT
   build: 2         # edition/rust-version/go pin + cargo cache in CI
   docs: 1          # STABILITY.md + CONTRIBUTING; no docs CI / agents-guide
   perf: 0          # no benchmark suite
-  vcs: 0           # no committed git hooks
+  vcs: 3           # committed pre-push hook, wired by make hooks, self-checked
   agent: 2         # CLAUDE.md + bullseye.yaml; no AGENTS.md
 
 tiers:
@@ -36,12 +36,12 @@ items:
   # ============================== CORRECTNESS =============================
   - id: correctness.tests
     dim: correctness
-    desc: cargo test --release runs on every push/PR via make bullseye
+    desc: cargo test runs on every push/PR via the `make gate` CI job
     state: enforced
     cadence: continuous
     enforce: blocking
     tier: 1
-    evidence: {ci_step: {workflow: ci.yml, name: Run bullseye invariants}}
+    evidence: {ci_step: {workflow: ci.yml, name: Run the gate}}
 
   - id: correctness.macos-ci
     dim: correctness
@@ -369,12 +369,12 @@ items:
   # ================================= BUILD ===============================
   - id: build.ci
     dim: build
-    desc: cargo build --release runs in CI via make bullseye
+    desc: cargo build --release runs in CI via the `make gate` job
     state: enforced
     cadence: continuous
     enforce: blocking
     tier: 1
-    evidence: {ci_job: ci.yml#bullseye}
+    evidence: {ci_job: ci.yml#gate}
 
   - id: build.edition-pinned
     dim: build
@@ -473,15 +473,32 @@ items:
     evidence: {absent: {file: {path: benches}}}
 
   # ============================== VCS / HISTORY =========================
-  - id: vcs.pre-commit-hook
+  - id: vcs.pre-push-hook
     dim: vcs
-    desc: Committed git hooks (scripts/hooks) gate locally before commit
-    state: planned
-    cadence: once-must-hold
-    enforce: informational
+    desc: A committed pre-push hook (scripts/hooks/pre-push) runs the gate
+    state: enforced
+    cadence: continuous
+    enforce: blocking
     tier: 3
-    reason: No scripts/hooks; core.hooksPath is the default .git/hooks.
-    evidence: {absent: {file: {path: scripts/hooks/pre-commit}}}
+    evidence: {file: {path: scripts/hooks/pre-push}}
+
+  - id: vcs.hooks-wired
+    dim: vcs
+    desc: "`make hooks` points core.hooksPath at the committed hook directory"
+    state: enforced
+    cadence: once-must-hold
+    enforce: blocking
+    tier: 3
+    evidence: {make_target: hooks}
+
+  - id: vcs.hooks-self-check
+    dim: vcs
+    desc: The gate refuses to pass locally when core.hooksPath is not wired
+    state: enforced
+    cadence: continuous
+    enforce: blocking
+    tier: 3
+    evidence: {file: {path: Makefile, matches: "core\\.hooksPath"}}
 
   # =================== AGENT-READINESS / ONBOARDING ====================
   - id: agent.claude-md
