@@ -157,6 +157,104 @@ mod tests {
         assert_eq!(parsed["ocr"][0]["text"], "Hello");
     }
 
+    /// The wire contract lives in docs/slide-event-schema.json, and
+    /// `additionalProperties: false` makes it exhaustive: a key the producer
+    /// emits but the schema omits is a validation failure for every consumer.
+    /// This is the only thing keeping the schema and this struct from drifting
+    /// apart again, so it compares the two field sets in both directions.
+    fn schema_properties() -> serde_json::Map<String, serde_json::Value> {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../docs/slide-event-schema.json"))
+                .expect("slide-event-schema.json is valid JSON");
+        assert_eq!(
+            schema["additionalProperties"], false,
+            "schema must stay closed, otherwise these field-set checks prove nothing"
+        );
+        schema["properties"]
+            .as_object()
+            .expect("schema has a properties object")
+            .clone()
+    }
+
+    /// Every optional field set, so the serialized keys are the full set of
+    /// keys the producer can ever emit.
+    fn fully_populated_event() -> SlideEvent {
+        SlideEvent {
+            phash: Some("0123456789abcdef".to_string()),
+            ocr: Some(vec![OcrWord {
+                text: "Hello".to_string(),
+                bbox: [0.1, 0.2, 0.3, 0.4],
+            }]),
+            transcript_window: Some(vec![Segment {
+                text: "spoken words".to_string(),
+                start_ms: 900,
+                end_ms: 1_100,
+            }]),
+            frontmost_app: Some("com.apple.Keynote".to_string()),
+            ..base_event()
+        }
+    }
+
+    #[test]
+    fn every_emitted_field_is_declared_in_the_schema() {
+        let props = schema_properties();
+        let json = serde_json::to_value(fully_populated_event()).unwrap();
+        for key in json.as_object().unwrap().keys() {
+            assert!(
+                props.contains_key(key),
+                "SlideEvent emits {key:?} but docs/slide-event-schema.json does not \
+                 declare it; under additionalProperties:false every consumer \
+                 validating against the schema will reject the event"
+            );
+        }
+    }
+
+    #[test]
+    fn every_declared_field_is_emittable() {
+        let props = schema_properties();
+        let json = serde_json::to_value(fully_populated_event()).unwrap();
+        let emitted = json.as_object().unwrap();
+        for key in props.keys() {
+            assert!(
+                emitted.contains_key(key),
+                "docs/slide-event-schema.json declares {key:?} but SlideEvent has no \
+                 field that serializes to it"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_required_fields_are_always_emitted() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../docs/slide-event-schema.json")).unwrap();
+        // base_event() leaves every optional field None, so its keys are exactly
+        // the fields the producer emits unconditionally.
+        let json = serde_json::to_value(base_event()).unwrap();
+        let emitted = json.as_object().unwrap();
+        for required in schema["required"].as_array().unwrap() {
+            let key = required.as_str().unwrap();
+            assert!(
+                emitted.contains_key(key),
+                "schema requires {key:?} but a minimal SlideEvent does not emit it"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_examples_validate_against_the_field_sets() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../docs/slide-event-schema.json")).unwrap();
+        let props = schema_properties();
+        for example in schema["examples"].as_array().unwrap() {
+            for key in example.as_object().unwrap().keys() {
+                assert!(
+                    props.contains_key(key),
+                    "schema example uses {key:?}, which the schema does not declare"
+                );
+            }
+        }
+    }
+
     #[test]
     fn parse_events_out_stdout() {
         assert!(matches!(

@@ -29,6 +29,12 @@
       "description": "Unix epoch time in milliseconds at the moment the PNG was fully written to disk.",
       "examples": [1744722050045]
     },
+    "phash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]+$",
+      "description": "Perceptual hash of the captured frame as lowercase hex, for downstream revisit detection without re-decoding the PNG. Declared by both producers (src/events.rs, meetcat/main.go); currently omitted on the live capture path, which uses meetcat-side RMS instead.",
+      "examples": ["c3f0a17e5b2d4498"]
+    },
     "ocr": {
       "type": "array",
       "description": "OCR words extracted from the frame (populated by 🎯T10.2; omitted until then).",
