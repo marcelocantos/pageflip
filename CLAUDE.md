@@ -43,5 +43,17 @@ two have diverged:
 Against the published `claudia v0.6.0` (replace removed) `go vet` and
 `go test ./...` both pass. So the choice is the owner's: port meetcat to the
 current claudia API and keep the path replace, or drop the replace and pin a
-published claudia. The gate stays red — and pushes stay blocked — until one of
-those happens.
+published claudia.
+
+**Pushes are not blocked by it.** `scripts/gate-meetcat.sh` runs the leg on
+every push and prints a boxed known-red ledger naming the cause and both
+resolutions, but does not fail the gate on the *declared* redness — the person
+pushing cannot fix it, and `--no-verify` would discard the four green Rust legs
+along with it. It ratchets in both directions: any output line not attributable
+to the declared signature blocks, and the leg going green while still declared
+red blocks. `PAGEFLIP_REQUIRE_MEETCAT=1 make gate` makes the known red blocking
+too.
+
+While the redness stands the leg detects nothing about meetcat's own source —
+`go vet` aborts at module load — so this buys visibility, not coverage. Full
+reasoning: [`docs/gate.md`](docs/gate.md).
