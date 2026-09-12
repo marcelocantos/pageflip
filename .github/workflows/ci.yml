@@ -31,3 +31,17 @@ jobs:
 
       - name: Run bullseye invariants
         run: make bullseye
+
+  meetcat:
+    name: meetcat Go (hermetic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: meetcat/go.mod
+      - name: Hermetic build and test
+        working-directory: meetcat
+        run: |
+          GOWORK=off go build ./...
+          GOWORK=off go test ./...
