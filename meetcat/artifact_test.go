@@ -4,12 +4,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type fakeNeutralAgent struct {
+	response string
+}
+
+func (f *fakeNeutralAgent) Send(string) error { return nil }
+func (f *fakeNeutralAgent) WaitForResponse(context.Context) (string, error) {
+	return f.response, nil
+}
+func (f *fakeNeutralAgent) SessionID() string { return "fake-neutral" }
 
 // ---------------------------------------------------------------------------
 // parseMarkdownSections
@@ -307,6 +318,44 @@ func TestCopyFileMissingSource(t *testing.T) {
 // ---------------------------------------------------------------------------
 // NewArtifactWriter
 // ---------------------------------------------------------------------------
+
+func TestRunMeetingWritesArtifactOnStop(t *testing.T) {
+	dir := t.TempDir()
+	fake := &fakeNeutralAgent{response: `## Decisions
+- Ship the artifact writer
+
+## Action items
+- Wire the stop path
+
+## Open questions
+- Who reviews the digest?
+`}
+	cfg := meetingConfig{
+		MeetingID:     "test-stop",
+		WorkDir:       dir,
+		NoSpawn:       true,
+		EnableAgents:  false,
+		OpenBrowser:   false,
+		EventStream:   strings.NewReader(""),
+		ArtifactAgent: fake,
+	}
+	if err := runMeeting(cfg); err != nil {
+		t.Fatalf("runMeeting: %v", err)
+	}
+	for _, name := range []string{"decisions.md", "actions.md", "open-questions.md"} {
+		path := filepath.Join(dir, "test-stop", name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("missing %s: %v", name, err)
+		}
+	}
+	decisions, err := os.ReadFile(filepath.Join(dir, "test-stop", "decisions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(decisions), "Ship the artifact writer") {
+		t.Errorf("decisions.md = %q", decisions)
+	}
+}
 
 func TestNewArtifactWriter(t *testing.T) {
 	cfg := ArtifactConfig{

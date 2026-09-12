@@ -267,6 +267,14 @@ type meetingConfig struct {
 	// WebDir is the dev-only path from which to serve HTML/CSS/JS.
 	// Empty means use the embedded copy compiled into the binary.
 	WebDir string
+
+	// EventStream, if set, is used instead of os.Stdin. Tests inject
+	// an already-closed or empty reader so runMeeting returns at once.
+	EventStream io.Reader
+
+	// ArtifactAgent, if set, is written at stop instead of the live
+	// pool's neutral agent. Tests inject a fake here.
+	ArtifactAgent ArtifactAgent
 }
 
 // runMeeting wires up the TUI, spawns pageflip (or reads stdin),
@@ -338,8 +346,11 @@ func runMeeting(cfg meetingConfig) error {
 	// caller has explicitly opted out (--no-spawn) or stdin is
 	// already a pipe (CI / tests).
 	var eventStream io.Reader = os.Stdin
+	if cfg.EventStream != nil {
+		eventStream = cfg.EventStream
+	}
 	var pageflipCleanup func()
-	if !cfg.NoSpawn && stdinIsTTY() {
+	if cfg.EventStream == nil && !cfg.NoSpawn && stdinIsTTY() {
 		stream, cleanup, err := spawnPageflip(ctx, sink, cfg.Pageflip.toFlags())
 		if err != nil {
 			return err
@@ -384,7 +395,28 @@ func runMeeting(cfg meetingConfig) error {
 		writeSessionIDsIfPossible(pool, os.Stderr)
 		printResumeHint(pool, os.Stderr)
 	}
+	writeArtifactsOnStop(ctx, cfg, pool, os.Stderr)
 	return runErr
+}
+
+// writeArtifactsOnStop asks the neutral agent for structured meeting
+// outputs and writes them to the artifact folder. Missing agent is a
+// no-op so --agents-less runs stay quiet.
+func writeArtifactsOnStop(ctx context.Context, cfg meetingConfig, pool *SessionPool, w io.Writer) {
+	agent := cfg.ArtifactAgent
+	if agent == nil && pool != nil {
+		agent = pool.Neutral()
+	}
+	if agent == nil {
+		return
+	}
+	aw := NewArtifactWriter(ArtifactConfig{
+		OutputDir: cfg.WorkDir,
+		MeetingID: cfg.MeetingID,
+	})
+	if err := aw.WriteArtifact(ctx, agent); err != nil {
+		fmt.Fprintf(w, "meetcat: write artifact: %v\n", err)
+	}
 }
 
 // sortedAllowedNames returns the map keys in canonical order so the

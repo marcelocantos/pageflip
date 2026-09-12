@@ -628,6 +628,18 @@ func (p *SessionPool) StopAll() {
 	wg.Wait()
 }
 
+// Neutral returns the live neutral specialist agent, or nil if that
+// specialist was not started (filtered out, or StartAll not yet run).
+func (p *SessionPool) Neutral() ArtifactAgent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.specialists["neutral"]
+	if st == nil {
+		return nil
+	}
+	return st.agent
+}
+
 // SessionIDs returns a map of specialist name → session ID for all
 // started specialists. Used by 🎯T15 to write session-ids.json.
 func (p *SessionPool) SessionIDs() map[string]string {

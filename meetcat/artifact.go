@@ -20,6 +20,17 @@ import (
 	"github.com/marcelocantos/claudia"
 )
 
+// ArtifactAgent is the subset of claudia.Agent that WriteArtifact needs.
+// Tests inject a fake; production passes *claudia.Agent.
+type ArtifactAgent interface {
+	Send(string) error
+	WaitForResponse(context.Context) (string, error)
+	SessionID() string
+}
+
+// claudia.Agent satisfies ArtifactAgent.
+var _ ArtifactAgent = (*claudia.Agent)(nil)
+
 // artifactPrompt is sent to the neutral agent at meeting-stop. It
 // instructs the agent to produce a structured response partitioned
 // into named markdown sections, each prefixed with a `## ` heading.
@@ -85,7 +96,7 @@ func NewArtifactWriter(config ArtifactConfig) *ArtifactWriter {
 //	  session-ids.json      (specialist session-id map)
 //	  transcript.jsonl      (copied from TranscriptPath if non-empty)
 //	  slides/               (symlinks to PNGs from SlidesDir if non-empty)
-func (w *ArtifactWriter) WriteArtifact(ctx context.Context, neutralAgent *claudia.Agent) error {
+func (w *ArtifactWriter) WriteArtifact(ctx context.Context, neutralAgent ArtifactAgent) error {
 	artifactDir := filepath.Join(w.config.OutputDir, w.config.MeetingID)
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return fmt.Errorf("create artifact dir: %w", err)
