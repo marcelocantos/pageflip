@@ -236,7 +236,6 @@ impl RedactedFrame {
     /// **Crate-internal constructor** — only callable from within this crate.
     ///
     /// Production callers must go through `RedactPipeline::apply_and_seal`.
-    #[allow(dead_code)] // used by RedactPipeline::apply_and_seal; wired into egress in T10.4+
     pub(crate) fn new_sealed(frame: Frame) -> Self {
         Self { frame }
     }

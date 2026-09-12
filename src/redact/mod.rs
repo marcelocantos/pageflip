@@ -43,6 +43,19 @@ impl RedactPipeline {
     pub fn apply(&self, frame: Frame) -> Result<Frame, RedactError> {
         self.redactors.iter().try_fold(frame, |f, r| r.redact(f))
     }
+
+    /// Run [`apply`] then seal the result as a [`crate::policy::RedactedFrame`].
+    ///
+    /// This is the only production path that can produce a `RedactedFrame`.
+    /// An empty pipeline still seals: identity redaction is a deliberate
+    /// no-op, not a bypass of the egress type.
+    pub fn apply_and_seal(
+        &self,
+        frame: Frame,
+    ) -> Result<crate::policy::RedactedFrame, RedactError> {
+        let frame = self.apply(frame)?;
+        Ok(crate::policy::RedactedFrame::new_sealed(frame))
+    }
 }
 
 impl Default for RedactPipeline {
@@ -153,6 +166,19 @@ mod tests {
         pipeline.push(Box::new(IdentityRedactor));
         let result = pipeline.apply(minimal_frame());
         assert!(matches!(result, Err(RedactError::ProcessingFailed(_))));
+    }
+
+    fn stub_egress(_frame: crate::policy::RedactedFrame) {}
+
+    // apply_and_seal returns a RedactedFrame that a stub egress fn accepts.
+    // A raw Frame cannot satisfy that parameter (does not compile).
+    #[test]
+    fn apply_and_seal_returns_redacted_frame() {
+        let pipeline = RedactPipeline::new();
+        let sealed = pipeline.apply_and_seal(minimal_frame()).unwrap();
+        assert_eq!(sealed.width(), 1);
+        assert_eq!(sealed.height(), 1);
+        stub_egress(sealed);
     }
 
     // Width/height are preserved through an identity pipeline.

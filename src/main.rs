@@ -28,7 +28,7 @@ use session_log::{LogEvent, SessionLog};
 use audio::{AudioCaptureHandle, NullTranscriber, Transcriber};
 use capture::{default_backend, Capture, CropSpec, Region, WindowSpec};
 use dedup::Dedup;
-use policy::ParanoidSaver;
+use policy::{frontmost_app_bundle_id, AppAllowlist, ParanoidSaver};
 use redact::{FaceBlurRedactor, RedactPipeline};
 
 enum Target {
@@ -139,6 +139,12 @@ struct Cli {
     /// local in this directory.
     #[arg(long, value_name = "DIR")]
     paranoid: Option<PathBuf>,
+
+    /// JSON allowlist of frontmost-app bundle IDs permitted to leave the
+    /// machine (`{"allowed_bundles":[...]}`). When set, frames whose
+    /// frontmost app is not listed are dropped before save/egress.
+    #[arg(long, value_name = "PATH")]
+    allowlist: Option<PathBuf>,
 
     /// Capture system audio alongside frames and feed it through a local
     /// Transcriber. Raw audio never leaves the audio module — only derived
@@ -280,6 +286,10 @@ fn run(cli: &Cli) -> Result<(), String> {
 
     let mut dedup = Dedup::new(cli.threshold);
     let redact = build_redact_pipeline(cli);
+    let allowlist = match &cli.allowlist {
+        Some(path) => Some(AppAllowlist::from_config(path).map_err(|e| e.to_string())?),
+        None => None,
+    };
     let paranoid = cli
         .paranoid
         .as_ref()
@@ -354,6 +364,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             &mut dedup,
             &redact,
             paranoid.as_ref(),
+            allowlist.as_ref(),
             &output_dir,
             sink.as_mut(),
             slog.as_mut(),
@@ -361,6 +372,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         ) {
             Ok(SaveResult::Saved) => slides_saved += 1,
             Ok(SaveResult::Deduped) => slides_deduped += 1,
+            Ok(SaveResult::Suppressed) => {}
             Err(e) => return Err(e),
         }
 
@@ -409,6 +421,8 @@ fn run(cli: &Cli) -> Result<(), String> {
 enum SaveResult {
     Saved,
     Deduped,
+    /// Frontmost app was not on the configured allowlist.
+    Suppressed,
 }
 
 fn start_audio_capture(
@@ -522,6 +536,7 @@ fn capture_once(
     dedup: &mut Dedup,
     redact: &Option<RedactPipeline>,
     paranoid: Option<&ParanoidSaver>,
+    allowlist: Option<&AppAllowlist>,
     output_dir: &Path,
     sink: Option<&mut EventSink>,
     slog: Option<&mut SessionLog>,
@@ -558,13 +573,25 @@ fn capture_once(
             .map_err(|e| format!("paranoid save: {e}"))?;
     }
 
-    let frame = match redact {
-        Some(pipeline) => pipeline.apply(frame).map_err(|e| e.to_string())?,
-        None => frame,
+    let frontmost = frontmost_app_bundle_id();
+    if let (Some(list), Some(bundle)) = (allowlist, frontmost.as_deref()) {
+        if !list.is_permitted(bundle) {
+            return Ok(SaveResult::Suppressed);
+        }
+    }
+
+    // Empty pipeline still seals: local save is an egress-shaped path
+    // (PNG leaves the capture process) and must go through RedactedFrame.
+    let pipeline = redact.as_ref();
+    let sealed = match pipeline {
+        Some(p) => p.apply_and_seal(frame).map_err(|e| e.to_string())?,
+        None => RedactPipeline::new()
+            .apply_and_seal(frame)
+            .map_err(|e| e.to_string())?,
     };
     let filename = format!("{slug}.png");
     let path = output_dir.join(&filename);
-    frame.save_png(&path).map_err(|e| e.to_string())?;
+    sealed.save_png(&path).map_err(|e| e.to_string())?;
 
     let t_end_ms = unix_ms();
 
@@ -595,7 +622,7 @@ fn capture_once(
             phash: None, // retired in favour of meetcat-side RMS over the saved PNG
             ocr: None,
             transcript_window: None,
-            frontmost_app: None,
+            frontmost_app: frontmost,
         };
         sink.write(&ev)
             .map_err(|e| format!("events-out write failed: {e}"))?;
