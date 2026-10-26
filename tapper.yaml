@@ -1,0 +1,23 @@
+# Homebrew tap publication for pageflip. `tapper push` runs from the dev
+# Mac after the GitHub release exists; the token lives in the macOS
+# keychain, so there is no Actions secret and no CI step.
+repo: marcelocantos/pageflip
+tap:
+  owner: marcelocantos
+  name: homebrew-tap
+push:
+  darwin_amd64: false
+  darwin_arm64: true
+  linux_amd64: false
+  linux_arm64: false
+  skip_checksum: true
+  update_readme_table: false
+install: |-
+  bin.install "pageflip"
+  bin.install "pageflip-feed"
+test: |-
+  system bin/"pageflip", "--version"
+  system bin/"pageflip-feed", "--version"
+token:
+  env: HOMEBREW_TAP_TOKEN
+  op: op://Personal/GitHub Homebrew Tap PAT/token
