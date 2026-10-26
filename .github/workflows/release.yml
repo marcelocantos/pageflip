@@ -72,7 +72,8 @@ jobs:
           path: ${{ env.TARBALL }}
           retention-days: 1
 
-  # ── Job 3: GitHub Release + Homebrew ─────────────────────────────────────────
+  # ── Job 3: GitHub Release ────────────────────────────────────────────────────
+  # (Homebrew formula: run `tapper push` after this job; see tapper.yaml.)
   release:
     name: Publish release
     needs: build
@@ -95,22 +96,3 @@ jobs:
           files: dist/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update Homebrew formula
-        uses: Justintime50/homebrew-releaser@v3
-        with:
-          homebrew_owner: marcelocantos
-          homebrew_tap: homebrew-tap
-          github_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          install: |-
-            bin.install "pageflip"
-            bin.install "pageflip-feed"
-          test: |-
-            system bin/"pageflip", "--version"
-            system bin/"pageflip-feed", "--version"
-          version: ${{ github.ref_name }}
-          target_darwin_amd64: false
-          target_darwin_arm64: true
-          target_linux_amd64: false
-          target_linux_arm64: false
-          skip_checksum: true
